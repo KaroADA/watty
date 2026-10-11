@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info};
 
+use crate::awake::KeepAwake;
 use crate::ble::Ble;
 use crate::config::{self, Config};
 use crate::recorder::Recorder;
@@ -68,6 +69,7 @@ pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: b
         crate::resolve_devices(&mut cfg, &dev).await?;
     }
 
+    let _awake = cfg.keep_awake.then(KeepAwake::start);
     let mut terminal = ratatui::init();
     let mut keys = spawn_keys();
     let result = ride(&mut terminal, &mut keys, &mut cfg, workout, ftp, weight, select, dev).await;

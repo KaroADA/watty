@@ -1,3 +1,4 @@
+mod awake;
 mod ble;
 mod config;
 mod devices;

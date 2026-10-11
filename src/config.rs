@@ -26,6 +26,9 @@ pub struct Config {
     /// Seconds before a segment change to announce it; 0 turns it off.
     #[serde(default = "default_segment_warning")]
     pub segment_warning: u32,
+    /// Keep the screen from dimming or locking during a ride.
+    #[serde(default = "default_true")]
+    pub keep_awake: bool,
 }
 
 fn default_segment_warning() -> u32 {
@@ -52,6 +55,7 @@ impl Default for Config {
             max_hr: None,
             hr_zones: None,
             segment_warning: default_segment_warning(),
+            keep_awake: true,
         }
     }
 }
