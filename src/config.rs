@@ -16,15 +16,29 @@ pub struct Config {
     /// Acceptable deviation from a workout's target cadence, ± rpm.
     #[serde(default = "default_cadence_tolerance")]
     pub cadence_tolerance: u16,
+    /// Pause when pedaling stops and resume when it starts again.
+    #[serde(default = "default_true")]
+    pub auto_pause: bool,
 }
 
 fn default_cadence_tolerance() -> u16 {
     5
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self { ftp: None, weight: None, trainer: None, hr: None, cadence_tolerance: default_cadence_tolerance() }
+        Self {
+            ftp: None,
+            weight: None,
+            trainer: None,
+            hr: None,
+            cadence_tolerance: default_cadence_tolerance(),
+            auto_pause: true,
+        }
     }
 }
 

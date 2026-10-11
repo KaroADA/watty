@@ -193,7 +193,8 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     // status line
     let status_line = match s.state {
         RunState::Ready => Line::styled(" Press SPACE to start", Style::new().yellow().bold()),
-        RunState::Paused => Line::styled(" ⏸ PAUSED — SPACE to resume", Style::new().yellow().bold()),
+        RunState::Paused { auto: false } => Line::styled(" ⏸ PAUSED — SPACE to resume", Style::new().yellow().bold()),
+        RunState::Paused { auto: true } => Line::styled(" ⏸ AUTO-PAUSED — start pedaling to resume", Style::new().yellow().bold()),
         RunState::Finished => Line::styled(" ✓ Workout complete — keep riding or press q", Style::new().green().bold()),
         RunState::Running => match v.message {
             Some((t, m)) if t.elapsed().as_secs() < 15 => Line::styled(format!(" {m}"), Style::new().fg(Color::Yellow)),
@@ -201,8 +202,9 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         },
     };
     f.render_widget(status_line, status);
+    let keys = if v.sim { "   s sim stop/start pedaling" } else { "" };
     f.render_widget(
-        Line::styled(" SPACE pause/resume   + / - intensity ±5%   n next segment   q quit", Style::new().fg(Color::DarkGray)),
+        Line::styled(format!(" SPACE pause/resume   + / - intensity ±5%   n next segment   q quit{keys}"), Style::new().fg(Color::DarkGray)),
         footer,
     );
 

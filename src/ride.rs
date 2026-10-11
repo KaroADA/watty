@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -100,7 +101,7 @@ async fn ride(
     }
 
     let mut devices = start_devices(trainer, hr, &dev, true).await?;
-    let mut session = Session::new(workout, ftp, weight);
+    let mut session = Session::new(workout, ftp, weight, cfg.auto_pause);
     let mut sensors = Sensors::default();
     let mut recorder: Option<Recorder> = None;
     let mut message: Option<(Instant, String)> = None;
@@ -145,6 +146,9 @@ async fn ride(
                     KeyCode::Char('+') | KeyCode::Char('=') => session.adjust_intensity(0.05),
                     KeyCode::Char('-') => session.adjust_intensity(-0.05),
                     KeyCode::Char('n') => session.skip_segment(),
+                    KeyCode::Char('s') => if let Some(c) = &devices.coasting {
+                        c.fetch_xor(true, Ordering::Relaxed);
+                    },
                     KeyCode::Char('q') | KeyCode::Esc => confirm_quit = true,
                     KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => confirm_quit = true,
                     _ => {}

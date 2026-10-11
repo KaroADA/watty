@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -40,13 +40,22 @@ fn step(opts: SimOptions) -> Duration {
 const DROPOUT_EVERY: u32 = 150;
 const DROPOUT_LEN: u32 = 6;
 
-pub fn spawn(tx: EventTx, target: watch::Receiver<TrainerTarget>, opts: SimOptions) {
+/// Returns a flag that makes the simulated rider stop pedaling while set.
+pub fn spawn(tx: EventTx, target: watch::Receiver<TrainerTarget>, opts: SimOptions) -> Arc<AtomicBool> {
     let power = Arc::new(AtomicU32::new(0));
-    tokio::spawn(trainer(tx.clone(), target, opts, power.clone()));
+    let coasting = Arc::new(AtomicBool::new(false));
+    tokio::spawn(trainer(tx.clone(), target, opts, power.clone(), coasting.clone()));
     tokio::spawn(hr(tx, opts, power));
+    coasting
 }
 
-async fn trainer(tx: EventTx, target: watch::Receiver<TrainerTarget>, opts: SimOptions, shared: Arc<AtomicU32>) {
+async fn trainer(
+    tx: EventTx,
+    target: watch::Receiver<TrainerTarget>,
+    opts: SimOptions,
+    shared: Arc<AtomicU32>,
+    coasting: Arc<AtomicBool>,
+) {
     link(&tx, Role::Trainer, LinkStatus::Connecting);
     sleep(Duration::from_millis(800)).await;
     link(&tx, Role::Trainer, LinkStatus::Connected);
@@ -73,19 +82,21 @@ async fn trainer(tx: EventTx, target: watch::Receiver<TrainerTarget>, opts: SimO
             applied = want;
             let _ = tx.send(DeviceEvent::TargetApplied(want));
         }
+        let coast = coasting.load(Ordering::Relaxed);
         let goal = match applied {
+            _ if coast => 0.0,
             TrainerTarget::Erg(w) => w as f64,
             _ => 160.0,
         };
         power += (goal - power) * 0.35;
-        let p = (power + noise.next() * 6.0).max(0.0);
+        let p = if coast { 0.0 } else { (power + noise.next() * 6.0).max(0.0) };
         shared.store(p as u32, Ordering::Relaxed);
 
         let speed_ms = (p / 0.28).cbrt();
         distance += speed_ms;
         let _ = tx.send(DeviceEvent::Bike(IndoorBikeData {
             speed_kmh: Some(speed_ms * 3.6),
-            cadence_rpm: Some((90.0 + noise.next() * 3.0).round()),
+            cadence_rpm: (!coast).then(|| (90.0 + noise.next() * 3.0).round()),
             power_w: Some(p.round() as i16),
             distance_m: Some(distance as u32),
             heart_rate: None,

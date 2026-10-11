@@ -6,6 +6,10 @@ use crate::workout::Workout;
 
 const STALE: Duration = Duration::from_secs(3);
 const AVG_WINDOW: Duration = Duration::from_secs(3);
+/// Power at or above this counts as pedaling, so auto-pause works without cadence.
+const PEDALING_W: u16 = 15;
+const AUTO_PAUSE_AFTER: u32 = 3;
+const AUTO_RESUME_AFTER: u32 = 2;
 
 /// Latest sensor values; anything older than `STALE` reads as missing.
 #[derive(Default)]
@@ -83,6 +87,10 @@ impl Sensors {
     pub fn hr(&self) -> Option<u16> {
         fresh(self.hr)
     }
+
+    pub fn pedaling(&self) -> bool {
+        self.instant_power().is_some_and(|p| p >= PEDALING_W) || self.cadence().is_some_and(|c| c > 0)
+    }
 }
 
 const BIKE_KG: f64 = 8.0;
@@ -110,7 +118,8 @@ pub fn virtual_speed(v_ms: f64, watts: f64, rider_kg: f64, dt: f64) -> f64 {
 pub enum RunState {
     Ready,
     Running,
-    Paused,
+    /// `auto`: paused because pedaling stopped; resumes when it starts again.
+    Paused { auto: bool },
     /// Workout over; keeps recording until the user quits.
     Finished,
 }
@@ -144,10 +153,14 @@ pub struct Session {
     pub speed_ms: f64,
     /// Actual power per workout second, for the chart.
     pub trace: Vec<Option<u16>>,
+    pub auto_pause: bool,
+    /// Consecutive seconds with / without pedaling.
+    pedal_secs: u32,
+    idle_secs: u32,
 }
 
 impl Session {
-    pub fn new(workout: Workout, ftp: u32, rider_kg: f64) -> Self {
+    pub fn new(workout: Workout, ftp: u32, rider_kg: f64, auto_pause: bool) -> Self {
         let n = workout.total_duration() as usize;
         Self {
             workout,
@@ -161,6 +174,9 @@ impl Session {
             distance_m: 0.0,
             speed_ms: 0.0,
             trace: vec![None; n],
+            auto_pause,
+            pedal_secs: 0,
+            idle_secs: 0,
         }
     }
 
@@ -176,7 +192,7 @@ impl Session {
         match self.state {
             RunState::Ready => TrainerTarget::Idle,
             RunState::Finished => TrainerTarget::FreeRide,
-            RunState::Running | RunState::Paused => {
+            RunState::Running | RunState::Paused { .. } => {
                 self.target_watts().map_or(TrainerTarget::FreeRide, TrainerTarget::Erg)
             }
         }
@@ -184,10 +200,30 @@ impl Session {
 
     pub fn toggle_pause(&mut self) {
         self.state = match self.state {
-            RunState::Ready | RunState::Paused => RunState::Running,
-            RunState::Running => RunState::Paused,
+            RunState::Ready | RunState::Paused { .. } => RunState::Running,
+            RunState::Running => RunState::Paused { auto: false },
             RunState::Finished => RunState::Finished,
         };
+        self.pedal_secs = 0;
+        self.idle_secs = 0;
+    }
+
+    fn update_auto_pause(&mut self, pedaling: bool) {
+        if pedaling {
+            self.pedal_secs += 1;
+            self.idle_secs = 0;
+        } else {
+            self.idle_secs += 1;
+            self.pedal_secs = 0;
+        }
+        if !self.auto_pause {
+            return;
+        }
+        match self.state {
+            RunState::Running if self.idle_secs >= AUTO_PAUSE_AFTER => self.state = RunState::Paused { auto: true },
+            RunState::Paused { auto: true } if self.pedal_secs >= AUTO_RESUME_AFTER => self.state = RunState::Running,
+            _ => {}
+        }
     }
 
     pub fn adjust_intensity(&mut self, delta: f64) {
@@ -205,9 +241,12 @@ impl Session {
 
     /// Advance one second. Returns the sample to record, if riding.
     pub fn tick(&mut self, s: &Sensors) -> Option<Sample> {
+        if self.state != RunState::Ready {
+            self.update_auto_pause(s.pedaling());
+        }
         match self.state {
             RunState::Ready => return None,
-            RunState::Paused => {
+            RunState::Paused { .. } => {
                 self.clock += 1;
                 self.speed_ms = 0.0;
                 return None;
@@ -243,10 +282,23 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::IndoorBikeData;
 
     fn session() -> Session {
         let w = Workout::parse(include_str!("../workouts/test_short.zwo")).unwrap();
-        Session::new(w, 200, 75.0)
+        Session::new(w, 200, 75.0, true)
+    }
+
+    fn riding(power: Option<i16>, cadence: Option<f64>) -> Sensors {
+        let mut s = Sensors::default();
+        s.apply(DeviceEvent::Bike(IndoorBikeData {
+            speed_kmh: None,
+            cadence_rpm: cadence,
+            power_w: power,
+            distance_m: None,
+            heart_rate: None,
+        }));
+        s
     }
 
     #[test]
@@ -282,10 +334,71 @@ mod tests {
     fn pause_stops_clock() {
         let mut s = session();
         s.toggle_pause();
-        s.tick(&Sensors::default());
+        s.tick(&riding(Some(100), None));
         s.toggle_pause();
         assert!(s.tick(&Sensors::default()).is_none());
         assert_eq!((s.pos, s.elapsed), (1, 1));
+    }
+
+    #[test]
+    fn auto_pause_on_power_only() {
+        let mut s = session();
+        s.toggle_pause();
+        let pedal = riding(Some(120), None);
+        s.tick(&pedal);
+        let idle = riding(Some(0), None);
+        for _ in 0..AUTO_PAUSE_AFTER {
+            s.tick(&idle);
+        }
+        assert_eq!(s.state, RunState::Paused { auto: true });
+        s.tick(&pedal);
+        assert_eq!(s.state, RunState::Paused { auto: true });
+        s.tick(&pedal);
+        assert_eq!(s.state, RunState::Running);
+    }
+
+    #[test]
+    fn cadence_counts_as_pedaling() {
+        let mut s = session();
+        s.toggle_pause();
+        let spin = riding(Some(0), Some(60.0));
+        for _ in 0..10 {
+            s.tick(&spin);
+        }
+        assert_eq!(s.state, RunState::Running);
+    }
+
+    #[test]
+    fn no_data_auto_pauses() {
+        let mut s = session();
+        s.toggle_pause();
+        for _ in 0..AUTO_PAUSE_AFTER {
+            s.tick(&Sensors::default());
+        }
+        assert_eq!(s.state, RunState::Paused { auto: true });
+    }
+
+    #[test]
+    fn manual_pause_does_not_auto_resume() {
+        let mut s = session();
+        s.toggle_pause();
+        s.toggle_pause();
+        let pedal = riding(Some(150), Some(90.0));
+        for _ in 0..10 {
+            s.tick(&pedal);
+        }
+        assert_eq!(s.state, RunState::Paused { auto: false });
+    }
+
+    #[test]
+    fn auto_pause_can_be_disabled() {
+        let mut s = session();
+        s.auto_pause = false;
+        s.toggle_pause();
+        for _ in 0..10 {
+            s.tick(&Sensors::default());
+        }
+        assert_eq!(s.state, RunState::Running);
     }
 
     #[test]

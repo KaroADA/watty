@@ -10,6 +10,8 @@ mod ui;
 mod workout;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -195,14 +197,16 @@ pub struct Devices {
     pub target: watch::Sender<TrainerTarget>,
     pub ble: Option<Ble>,
     pub addresses: Vec<String>,
+    /// Simulator only: stops the simulated pedaling while set.
+    pub coasting: Option<Arc<AtomicBool>>,
 }
 
 async fn start_devices(trainer: Option<String>, hr: Option<String>, dev: &DeviceArgs, control: bool) -> Result<Devices> {
     let (tx, events) = mpsc::unbounded_channel();
     let (target, target_rx) = watch::channel(TrainerTarget::Idle);
     if dev.sim {
-        sim::spawn(tx, target_rx, SimOptions { speed: dev.speed, dropouts: dev.sim_dropouts });
-        return Ok(Devices { events, target, ble: None, addresses: vec![] });
+        let coasting = sim::spawn(tx, target_rx, SimOptions { speed: dev.speed, dropouts: dev.sim_dropouts });
+        return Ok(Devices { events, target, ble: None, addresses: vec![], coasting: Some(coasting) });
     }
     let ble = Ble::new().await?;
     let addresses: Vec<String> = trainer.iter().chain(hr.iter()).cloned().collect();
@@ -212,7 +216,7 @@ async fn start_devices(trainer: Option<String>, hr: Option<String>, dev: &Device
     if let Some(addr) = hr {
         tokio::spawn(ble::run_hr(ble.clone(), addr, tx));
     }
-    Ok(Devices { events, target, ble: Some(ble), addresses })
+    Ok(Devices { events, target, ble: Some(ble), addresses, coasting: None })
 }
 
 /// Fills devices missing from CLI/config by auto-detection and saves unique finds.
