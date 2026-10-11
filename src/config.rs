@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// `~/.config/watty/config.toml`. Every field is optional; CLI flags win.
@@ -19,6 +19,10 @@ pub struct Config {
     /// Pause when pedaling stops and resume when it starts again.
     #[serde(default = "default_true")]
     pub auto_pause: bool,
+    /// Heart-rate zones default to 60/70/80/90% of this.
+    pub max_hr: Option<u16>,
+    /// Upper bounds of zones 1–4, bpm; overrides `max_hr`.
+    pub hr_zones: Option<Vec<u16>>,
 }
 
 fn default_cadence_tolerance() -> u16 {
@@ -38,6 +42,8 @@ impl Default for Config {
             hr: None,
             cadence_tolerance: default_cadence_tolerance(),
             auto_pause: true,
+            max_hr: None,
+            hr_zones: None,
         }
     }
 }
@@ -60,6 +66,19 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl Config {
+    pub fn hr_zones(&self) -> Result<Option<HrZones>> {
+        if let Some(z) = &self.hr_zones {
+            let Ok(bounds) = <[u16; 4]>::try_from(z.as_slice()) else {
+                bail!("hr_zones needs 4 values (upper bounds of zones 1–4), got {}", z.len());
+            };
+            if !bounds.is_sorted_by(|a, b| a < b) {
+                bail!("hr_zones must be increasing: {z:?}");
+            }
+            return Ok(Some(HrZones(bounds)));
+        }
+        Ok(self.max_hr.map(|max| HrZones([60, 70, 80, 90].map(|pct| (max as u32 * pct / 100) as u16))))
+    }
+
     pub fn load() -> Result<Self> {
         let path = config_path();
         match std::fs::read_to_string(&path) {
@@ -76,5 +95,40 @@ impl Config {
         }
         std::fs::write(&path, toml::to_string_pretty(self)?)
             .with_context(|| format!("cannot write {}", path.display()))
+    }
+}
+
+/// Upper bounds of heart-rate zones 1–4; zone 5 is above.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HrZones(pub [u16; 4]);
+
+impl HrZones {
+    /// Zone 1–5.
+    pub fn zone(&self, bpm: u16) -> u8 {
+        self.0.iter().take_while(|&&b| bpm > b).count() as u8 + 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zones_from_max_hr() {
+        let cfg = Config { max_hr: Some(190), ..Config::default() };
+        let z = cfg.hr_zones().unwrap().unwrap();
+        assert_eq!(z, HrZones([114, 133, 152, 171]));
+        assert_eq!([z.zone(90), z.zone(114), z.zone(115), z.zone(152), z.zone(171), z.zone(185)], [1, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn explicit_zones_win_and_are_validated() {
+        let cfg = Config { max_hr: Some(190), hr_zones: Some(vec![120, 140, 155, 170]), ..Config::default() };
+        assert_eq!(cfg.hr_zones().unwrap(), Some(HrZones([120, 140, 155, 170])));
+        let cfg = Config { hr_zones: Some(vec![120, 140, 155]), ..Config::default() };
+        assert!(cfg.hr_zones().is_err());
+        let cfg = Config { hr_zones: Some(vec![120, 160, 155, 170]), ..Config::default() };
+        assert!(cfg.hr_zones().is_err());
+        assert_eq!(Config::default().hr_zones().unwrap(), None);
     }
 }

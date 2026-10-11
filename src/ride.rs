@@ -59,6 +59,7 @@ pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: b
         .or(cfg.weight)
         .filter(|w| (30.0..=200.0).contains(w))
         .ok_or_else(|| anyhow!("weight unknown: pass --weight <kg> (it will be saved to config)"))?;
+    cfg.hr_zones()?;
     cfg.ftp = Some(ftp);
     cfg.weight = Some(weight);
     cfg.save()?;
@@ -107,6 +108,7 @@ async fn ride(
     let mut message: Option<(Instant, String)> = None;
     let mut confirm_quit = false;
     let mut zoom = ChartZoom::new();
+    let hr_zones = cfg.hr_zones()?;
 
     let mut tick = interval(Duration::from_secs_f64(1.0 / dev.speed.max(0.1)));
     tick.set_missed_tick_behavior(MissedTickBehavior::Burst);
@@ -128,6 +130,7 @@ async fn ride(
                     sim: dev.sim,
                     recording: rec_path.as_deref(),
                     zoom: &zoom,
+                    hr_zones,
                     cadence_tolerance: cfg.cadence_tolerance,
                 },
             )

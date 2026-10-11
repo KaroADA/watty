@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Widget};
 
 use crate::ble::Discovered;
+use crate::config::HrZones;
 use crate::devices::{LinkStatus, TrainerTarget};
 use crate::session::{RunState, Sensors, Session};
 use crate::workout::fmt_duration;
@@ -174,6 +175,7 @@ pub struct View<'a> {
     pub sim: bool,
     pub recording: Option<&'a str>,
     pub zoom: &'a ChartZoom,
+    pub hr_zones: Option<HrZones>,
     pub cadence_tolerance: u16,
 }
 
@@ -221,7 +223,7 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     f.render_widget(BigValue { title: "POWER 3s", value: num(power), unit: "W", color: power_color, note: None, icon: Some(Icon::Power) }, cols[0]);
     let target_color = target.map_or(Color::DarkGray, |t| zone_color(t as f64 / s.ftp as f64));
     f.render_widget(BigValue { title: "TARGET", value: num(target), unit: "W", color: target_color, note: None, icon: Some(Icon::Target) }, cols[1]);
-    f.render_widget(BigValue { title: "HEART RATE", value: num(v.sensors.hr()), unit: "bpm", color: Color::LightRed, note: None, icon: Some(Icon::Heart) }, cols[2]);
+    draw_hr(f, cols[2], v);
     draw_cadence(f, cols[3], v);
 
     let seg_idx = s.workout.segment_index_at(s.pos as f64);
@@ -261,6 +263,31 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
                 .block(Block::bordered().border_type(BorderType::Double).border_style(Style::new().yellow())),
             area,
         );
+    }
+}
+
+fn draw_hr(f: &mut Frame, area: Rect, v: &View) {
+    let hr = v.sensors.hr();
+    let value = hr.map_or("-".to_string(), |b| b.to_string());
+    let Some(zone) = v.hr_zones.zip(hr).map(|(z, b)| z.zone(b)) else {
+        let w = BigValue { title: "HEART RATE", value, unit: "bpm", color: Color::LightRed, note: None, icon: Some(Icon::Heart) };
+        f.render_widget(w, area);
+        return;
+    };
+    let color = hr_zone_color(zone);
+    let title = format!("HEART RATE Z{zone}");
+    let note = Some(Span::styled(format!(" Z{zone} "), Style::new().fg(Color::Black).bg(color).bold()));
+    f.render_widget(BigValue { title: &title, value, unit: "bpm", color, note, icon: Some(Icon::Heart) }, area);
+}
+
+/// Same palette as the power zones.
+fn hr_zone_color(zone: u8) -> Color {
+    match zone {
+        1 => Color::Gray,
+        2 => Color::Blue,
+        3 => Color::Green,
+        4 => Color::Yellow,
+        _ => Color::Red,
     }
 }
 
