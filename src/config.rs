@@ -23,6 +23,13 @@ pub struct Config {
     pub max_hr: Option<u16>,
     /// Upper bounds of zones 1–4, bpm; overrides `max_hr`.
     pub hr_zones: Option<Vec<u16>>,
+    /// Seconds before a segment change to announce it; 0 turns it off.
+    #[serde(default = "default_segment_warning")]
+    pub segment_warning: u32,
+}
+
+fn default_segment_warning() -> u32 {
+    10
 }
 
 fn default_cadence_tolerance() -> u16 {
@@ -44,6 +51,7 @@ impl Default for Config {
             auto_pause: true,
             max_hr: None,
             hr_zones: None,
+            segment_warning: default_segment_warning(),
         }
     }
 }

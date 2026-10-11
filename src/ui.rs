@@ -176,6 +176,8 @@ pub struct View<'a> {
     pub recording: Option<&'a str>,
     pub zoom: &'a ChartZoom,
     pub hr_zones: Option<HrZones>,
+    /// Seconds before a segment change to announce it; 0 = off.
+    pub segment_warning: u32,
     pub cadence_tolerance: u16,
 }
 
@@ -253,6 +255,7 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         keys.push(("s", "sim stop/start pedaling"));
     }
     f.render_widget(key_hints(&keys), footer);
+    draw_upcoming(f, chart, v);
 
     if v.confirm_quit {
         let area = centered(f.area(), 44, 5);
@@ -263,6 +266,57 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
                 .block(Block::bordered().border_type(BorderType::Double).border_style(Style::new().yellow())),
             area,
         );
+    }
+}
+
+/// Popup over the chart counting down to the next segment.
+fn draw_upcoming(f: &mut Frame, area: Rect, v: &View) {
+    let s = v.session;
+    let Some(i) = s.workout.segment_index_at(s.pos as f64).filter(|_| s.state == RunState::Running) else { return };
+    let left = s.workout.segments[i].end() - s.pos;
+    if left == 0 || left > v.segment_warning {
+        return;
+    }
+    let next = s.workout.segments.get(i + 1);
+    let color = next.and_then(|n| n.power_start).map_or(Color::White, |p| zone_color(p * s.intensity));
+    let title = match next {
+        Some(n) => format!(" NEXT: {} · {} ", n.kind.label(), fmt_duration(n.duration)),
+        None => " WORKOUT ENDS ".to_string(),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(Style::new().fg(color))
+        .title(Span::styled(title, Style::new().fg(Color::Black).bg(color).bold()));
+    let popup = centered(area, area.width * 3 / 4, 11);
+    f.render_widget(Clear, popup);
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let countdown = BigValue { title: "IN", value: left.to_string(), unit: "s", color: Color::White, note: None, icon: Some(Icon::Hourglass) };
+    let Some(next) = next else {
+        f.render_widget(countdown, inner);
+        return;
+    };
+    let watts = |p: f64| (p * s.ftp as f64 * s.intensity).round() as u32;
+    let power = match (next.power_start, next.power_end) {
+        (Some(a), Some(b)) if watts(a) != watts(b) => format!("{}-{}", watts(a), watts(b)),
+        (Some(a), _) => watts(a).to_string(),
+        _ => "-".to_string(),
+    };
+    let target = BigValue { title: "TARGET", value: power, unit: "W", color, note: None, icon: Some(Icon::Target) };
+    match next.cadence {
+        Some(rpm) => {
+            let cols = Layout::horizontal([Constraint::Fill(1); 3]).split(inner);
+            let cadence = BigValue { title: "CADENCE", value: rpm.to_string(), unit: "rpm", color: Color::White, note: None, icon: Some(Icon::Cadence) };
+            f.render_widget(countdown, cols[0]);
+            f.render_widget(target, cols[1]);
+            f.render_widget(cadence, cols[2]);
+        }
+        None => {
+            let cols = Layout::horizontal([Constraint::Fill(1); 2]).split(inner);
+            f.render_widget(countdown, cols[0]);
+            f.render_widget(target, cols[1]);
+        }
     }
 }
 

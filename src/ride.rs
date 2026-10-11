@@ -131,6 +131,7 @@ async fn ride(
                     recording: rec_path.as_deref(),
                     zoom: &zoom,
                     hr_zones,
+                    segment_warning: cfg.segment_warning,
                     cadence_tolerance: cfg.cadence_tolerance,
                 },
             )
