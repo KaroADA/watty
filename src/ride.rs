@@ -105,6 +105,7 @@ async fn ride(
 
     let mut devices = start_devices(trainer, hr, &dev, true).await?;
     let mut session = Session::new(workout, ftp, weight, cfg.auto_pause);
+    session.soft_start = cfg.soft_start;
     let mut sensors = Sensors::default();
     let mut recorder: Option<Recorder> = None;
     let mut message: Option<(Instant, String)> = None;

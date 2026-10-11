@@ -10,6 +10,10 @@ const AVG_WINDOW: Duration = Duration::from_secs(3);
 const PEDALING_W: u16 = 15;
 const AUTO_PAUSE_AFTER: u32 = 3;
 const AUTO_RESUME_AFTER: u32 = 2;
+/// After (re)starting, ERG climbs from this fraction of the target over `SOFT_START_SECS`,
+/// so pushing off from a standstill isn't a wall.
+const SOFT_START_FROM: f64 = 0.5;
+const SOFT_START_SECS: u32 = 5;
 
 /// Latest sensor values; anything older than `STALE` reads as missing.
 #[derive(Default)]
@@ -154,6 +158,9 @@ pub struct Session {
     /// Actual power per workout second, for the chart.
     pub trace: Vec<Option<u16>>,
     pub auto_pause: bool,
+    pub soft_start: bool,
+    /// Seconds of soft start remaining.
+    soft_left: u32,
     /// Consecutive seconds with / without pedaling.
     pedal_secs: u32,
     idle_secs: u32,
@@ -175,6 +182,8 @@ impl Session {
             speed_ms: 0.0,
             trace: vec![None; n],
             auto_pause,
+            soft_start: true,
+            soft_left: 0,
             pedal_secs: 0,
             idle_secs: 0,
         }
@@ -192,18 +201,37 @@ impl Session {
         match self.state {
             RunState::Ready => TrainerTarget::Idle,
             RunState::Finished => TrainerTarget::FreeRide,
-            RunState::Running | RunState::Paused { .. } => {
-                self.target_watts().map_or(TrainerTarget::FreeRide, TrainerTarget::Erg)
+            RunState::Running | RunState::Paused { .. } => match self.target_watts() {
+                Some(w) => TrainerTarget::Erg((w as f64 * self.soft_factor()).round() as u16),
+                None => TrainerTarget::FreeRide,
+            },
+        }
+    }
+
+    fn soft_factor(&self) -> f64 {
+        match self.state {
+            RunState::Paused { .. } if self.soft_start => SOFT_START_FROM,
+            RunState::Running if self.soft_left > 0 => {
+                let done = (SOFT_START_SECS - self.soft_left) as f64 / SOFT_START_SECS as f64;
+                SOFT_START_FROM + (1.0 - SOFT_START_FROM) * done
             }
+            _ => 1.0,
+        }
+    }
+
+    fn resume(&mut self) {
+        self.state = RunState::Running;
+        if self.soft_start {
+            self.soft_left = SOFT_START_SECS;
         }
     }
 
     pub fn toggle_pause(&mut self) {
-        self.state = match self.state {
-            RunState::Ready | RunState::Paused { .. } => RunState::Running,
-            RunState::Running => RunState::Paused { auto: false },
-            RunState::Finished => RunState::Finished,
-        };
+        match self.state {
+            RunState::Ready | RunState::Paused { .. } => self.resume(),
+            RunState::Running => self.state = RunState::Paused { auto: false },
+            RunState::Finished => {}
+        }
         self.pedal_secs = 0;
         self.idle_secs = 0;
     }
@@ -221,7 +249,7 @@ impl Session {
         }
         match self.state {
             RunState::Running if self.idle_secs >= AUTO_PAUSE_AFTER => self.state = RunState::Paused { auto: true },
-            RunState::Paused { auto: true } if self.pedal_secs >= AUTO_RESUME_AFTER => self.state = RunState::Running,
+            RunState::Paused { auto: true } if self.pedal_secs >= AUTO_RESUME_AFTER => self.resume(),
             _ => {}
         }
     }
@@ -261,6 +289,7 @@ impl Session {
         self.speed_ms = virtual_speed(self.speed_ms, power.unwrap_or(0) as f64, self.rider_kg, 1.0);
         self.distance_m += self.speed_ms;
         self.elapsed += 1;
+        self.soft_left = self.soft_left.saturating_sub(1);
         if self.state == RunState::Running {
             self.pos += 1;
             if self.pos >= self.workout.total_duration() {
@@ -286,7 +315,9 @@ mod tests {
 
     fn session() -> Session {
         let w = Workout::parse(include_str!("../workouts/test_short.zwo")).unwrap();
-        Session::new(w, 200, 75.0, true)
+        let mut s = Session::new(w, 200, 75.0, true);
+        s.soft_start = false;
+        s
     }
 
     fn riding(power: Option<i16>, cadence: Option<f64>) -> Sensors {
@@ -388,6 +419,26 @@ mod tests {
             s.tick(&pedal);
         }
         assert_eq!(s.state, RunState::Paused { auto: false });
+    }
+
+    #[test]
+    fn soft_start_ramps_up_after_resume() {
+        let mut s = session();
+        s.soft_start = true;
+        let erg = |s: &Session, frac: f64| TrainerTarget::Erg((s.target_watts().unwrap() as f64 * frac).round() as u16);
+        s.toggle_pause();
+        assert_eq!(s.trainer_target(), erg(&s, 0.5));
+        let pedal = riding(Some(100), Some(90.0));
+        s.tick(&pedal);
+        assert_eq!(s.trainer_target(), erg(&s, 0.6));
+        for _ in 1..SOFT_START_SECS {
+            s.tick(&pedal);
+        }
+        assert_eq!(s.trainer_target(), erg(&s, 1.0));
+        s.toggle_pause();
+        assert_eq!(s.trainer_target(), erg(&s, 0.5));
+        s.toggle_pause();
+        assert_eq!(s.trainer_target(), erg(&s, 0.5));
     }
 
     #[test]

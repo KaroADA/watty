@@ -29,6 +29,9 @@ pub struct Config {
     /// Keep the screen from dimming or locking during a ride.
     #[serde(default = "default_true")]
     pub keep_awake: bool,
+    /// Lower ERG while paused and ramp it back up after resuming.
+    #[serde(default = "default_true")]
+    pub soft_start: bool,
 }
 
 fn default_segment_warning() -> u32 {
@@ -56,6 +59,7 @@ impl Default for Config {
             hr_zones: None,
             segment_warning: default_segment_warning(),
             keep_awake: true,
+            soft_start: true,
         }
     }
 }
