@@ -33,6 +33,44 @@ fn glyph(c: char) -> [&'static str; GLYPH_ROWS] {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Icon {
+    Power,
+    Target,
+    Heart,
+    Cadence,
+    Hourglass,
+    Clock,
+}
+
+impl Icon {
+    /// Half-block pixel art, drawn at full resolution regardless of the digit scale.
+    fn rows(self) -> [&'static str; GLYPH_ROWS] {
+        match self {
+            Icon::Power => ["   ▄███▀", " ▄███▀  ", "▀▀▀████▀", " ▄██▀▀  ", " █▀     "],
+            Icon::Target => [" ▄██████▄ ", "██▀ ▄▄ ▀██", "██ ████ ██", "██▄ ▀▀ ▄██", " ▀██████▀ "],
+            Icon::Heart => ["▄███▄ ▄███▄", "███████████", "▀█████████▀", "  ▀█████▀  ", "    ▀█▀    "],
+            Icon::Cadence => ["    ████▄   ", "  ▄     ▀█▄ ", "▄███▄  ▀███▀", " ▀█▄     ▀  ", "   ▀████    "],
+            Icon::Hourglass => ["██████████", " ▀█▄  ▄█▀ ", "   ████   ", " ▄█▀  ▀█▄ ", "██████████"],
+            Icon::Clock => ["  ▄▄████▄▄  ", "▄█▀▀ ▄▄ ▀▀█▄", "██   ██▄▄ ██", "▀█▄▄    ▄▄█▀", "  ▀▀████▀▀  "],
+        }
+    }
+}
+
+/// Draws block art, each cell widened `scale` times.
+fn draw_art(buf: &mut Buffer, x: u16, y: u16, rows: &[&str; GLYPH_ROWS], scale: u16, style: Style) {
+    for (row, line) in rows.iter().enumerate() {
+        for (col, ch) in line.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            for s in 0..scale {
+                buf[(x + col as u16 * scale + s, y + row as u16)].set_char(ch).set_style(style);
+            }
+        }
+    }
+}
+
 fn big_width(text: &str, scale: u16) -> u16 {
     let w: u16 = text.chars().map(|c| glyph(c)[0].chars().count() as u16 * scale).sum();
     w + text.chars().count().saturating_sub(1) as u16
@@ -45,6 +83,7 @@ struct BigValue<'a> {
     color: Color,
     /// Bottom-left badge.
     note: Option<Span<'a>>,
+    icon: Option<Icon>,
 }
 
 impl Widget for BigValue<'_> {
@@ -72,25 +111,21 @@ impl Widget for BigValue<'_> {
             Paragraph::new(self.value).style(style).alignment(Alignment::Center).render(Rect { y, height: 1, ..inner }, buf);
             return;
         }
-        let w = big_width(&self.value, scale);
-        let x0 = inner.x + (inner.width - w) / 2;
+        let digits_w = big_width(&self.value, scale);
+        // The icon only shows when it fits next to the digits at the same scale.
+        let icon_w = |icon: Icon| icon.rows()[0].chars().count() as u16 + 2 * scale;
+        let icon = self.icon.filter(|&i| digits_w + icon_w(i) <= inner.width);
+        let icon_w = icon.map_or(0, icon_w);
+        let mut x = inner.x + (inner.width - digits_w - icon_w) / 2;
         let y0 = inner.y + (inner.height - GLYPH_ROWS as u16) / 2;
-        let mut x = x0;
+        if let Some(icon) = icon {
+            draw_art(buf, x, y0, &icon.rows(), 1, Style::new().fg(self.color));
+            x += icon_w;
+        }
         for c in self.value.chars() {
             let g = glyph(c);
-            let gw = g[0].chars().count() as u16;
-            for (row, line) in g.iter().enumerate() {
-                for (col, ch) in line.chars().enumerate() {
-                    if ch == ' ' {
-                        continue;
-                    }
-                    for s in 0..scale {
-                        let cx = x + col as u16 * scale + s;
-                        buf[(cx, y0 + row as u16)].set_char('█').set_style(style);
-                    }
-                }
-            }
-            x += gw * scale + 1;
+            draw_art(buf, x, y0, &g, scale, style);
+            x += g[0].chars().count() as u16 * scale + 1;
         }
     }
 }
@@ -180,17 +215,17 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     };
     let num = |v: Option<u16>| v.map_or("-".to_string(), |v| v.to_string());
     let cols = Layout::horizontal([Constraint::Fill(1); 4]).split(row1);
-    f.render_widget(BigValue { title: "POWER 3s", value: num(power), unit: "W", color: power_color, note: None }, cols[0]);
+    f.render_widget(BigValue { title: "POWER 3s", value: num(power), unit: "W", color: power_color, note: None, icon: Some(Icon::Power) }, cols[0]);
     let target_color = target.map_or(Color::DarkGray, |t| zone_color(t as f64 / s.ftp as f64));
-    f.render_widget(BigValue { title: "TARGET", value: num(target), unit: "W", color: target_color, note: None }, cols[1]);
-    f.render_widget(BigValue { title: "HEART RATE", value: num(v.sensors.hr()), unit: "bpm", color: Color::LightRed, note: None }, cols[2]);
+    f.render_widget(BigValue { title: "TARGET", value: num(target), unit: "W", color: target_color, note: None, icon: Some(Icon::Target) }, cols[1]);
+    f.render_widget(BigValue { title: "HEART RATE", value: num(v.sensors.hr()), unit: "bpm", color: Color::LightRed, note: None, icon: Some(Icon::Heart) }, cols[2]);
     draw_cadence(f, cols[3], v);
 
     let seg_idx = s.workout.segment_index_at(s.pos as f64);
     let seg_left = seg_idx.map_or(0, |i| s.workout.segments[i].end() - s.pos);
     let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).split(row2);
-    f.render_widget(BigValue { title: "SEGMENT LEFT", value: fmt_duration(seg_left), unit: "", color: Color::White, note: None }, cols[0]);
-    f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White, note: None }, cols[1]);
+    f.render_widget(BigValue { title: "SEGMENT LEFT", value: fmt_duration(seg_left), unit: "", color: Color::White, note: None, icon: Some(Icon::Hourglass) }, cols[0]);
+    f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White, note: None, icon: Some(Icon::Clock) }, cols[1]);
     draw_info(f, cols[2], v, seg_idx);
 
     f.render_widget(Chart { session: s, zoom: v.zoom.progress() }, chart);
@@ -240,7 +275,7 @@ fn draw_cadence(f: &mut Frame, area: Rect, v: &View) {
     let cadence = v.sensors.cadence();
     let value = cadence.map_or("-".to_string(), |c| c.to_string());
     let Some(target) = s.workout.cadence_at(s.pos as f64).filter(|_| s.state != RunState::Finished) else {
-        let w = BigValue { title: "CADENCE", value, unit: "rpm", color: Color::LightCyan, note: None };
+        let w = BigValue { title: "CADENCE", value, unit: "rpm", color: Color::LightCyan, note: None, icon: Some(Icon::Cadence) };
         f.render_widget(w, area);
         return;
     };
@@ -258,7 +293,7 @@ fn draw_cadence(f: &mut Frame, area: Rect, v: &View) {
         Some(_) => (Color::Green, Some(Span::styled(" ✓ ", Style::new().fg(Color::Green).bold()))),
         None => (Color::LightCyan, None),
     };
-    f.render_widget(BigValue { title: &title, value, unit: "rpm", color, note }, area);
+    f.render_widget(BigValue { title: &title, value, unit: "rpm", color, note, icon: Some(Icon::Cadence) }, area);
 }
 
 fn draw_info(f: &mut Frame, area: Rect, v: &View, seg_idx: Option<usize>) {
