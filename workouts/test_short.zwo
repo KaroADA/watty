@@ -1,0 +1,11 @@
+<workout_file>
+    <name>Test 5 min (ERG check)</name>
+    <description>Short ERG control test: ramp, steady, intervals, free ride.</description>
+    <sportType>bike</sportType>
+    <workout>
+        <Ramp Duration="60" PowerLow="0.40" PowerHigh="0.60"/>
+        <SteadyState Duration="60" Power="0.70"/>
+        <IntervalsT Repeat="2" OnDuration="30" OffDuration="30" OnPower="0.85" OffPower="0.50"/>
+        <FreeRide Duration="60"/>
+    </workout>
+</workout_file>
