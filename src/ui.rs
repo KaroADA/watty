@@ -41,6 +41,7 @@ enum Icon {
     Cadence,
     Hourglass,
     Clock,
+    Flag,
 }
 
 impl Icon {
@@ -52,6 +53,7 @@ impl Icon {
             Icon::Heart => ["▄███▄ ▄███▄", "███████████", "▀█████████▀", "  ▀█████▀  ", "    ▀█▀    "],
             Icon::Cadence => ["    ████▄   ", "  ▄     ▀█▄ ", "▄███▄  ▀███▀", " ▀█▄     ▀  ", "   ▀████    "],
             Icon::Hourglass => ["██████████", " ▀█▄  ▄█▀ ", "   ████   ", " ▄█▀  ▀█▄ ", "██████████"],
+            Icon::Flag => ["██▄▄  ▄▄  ▄▄", "██▀▀▄▄▀▀▄▄▀▀", "██▄▄▀▀▄▄▀▀▄▄", "██▀▀  ▀▀  ▀▀", "██          "],
             Icon::Clock => ["  ▄▄████▄▄  ", "▄█▀▀ ▄▄ ▀▀█▄", "██   ██▄▄ ██", "▀█▄▄    ▄▄█▀", "  ▀▀████▀▀  "],
         }
     }
@@ -198,6 +200,7 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     };
     spans.push(erg);
     spans.push(Span::raw(format!("Intensity {:.0}%  ", s.intensity * 100.0)));
+    spans.push(Span::raw(format!("{:.2} km  {:.1} km/h  ", s.distance_m / 1000.0, s.speed_kmh())));
     if v.sim {
         spans.push(Span::styled("SIM ", Style::new().magenta().bold()));
     }
@@ -226,7 +229,8 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).split(row2);
     f.render_widget(BigValue { title: "SEGMENT LEFT", value: fmt_duration(seg_left), unit: "", color: Color::White, note: None, icon: Some(Icon::Hourglass) }, cols[0]);
     f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White, note: None, icon: Some(Icon::Clock) }, cols[1]);
-    draw_info(f, cols[2], v, seg_idx);
+    let left = s.workout.total_duration().saturating_sub(s.pos);
+    f.render_widget(BigValue { title: "REMAINING", value: fmt_duration(left), unit: "", color: Color::White, note: None, icon: Some(Icon::Flag) }, cols[2]);
 
     f.render_widget(Chart { session: s, zoom: v.zoom.progress() }, chart);
 
@@ -294,49 +298,6 @@ fn draw_cadence(f: &mut Frame, area: Rect, v: &View) {
         None => (Color::LightCyan, None),
     };
     f.render_widget(BigValue { title: &title, value, unit: "rpm", color, note, icon: Some(Icon::Cadence) }, area);
-}
-
-fn draw_info(f: &mut Frame, area: Rect, v: &View, seg_idx: Option<usize>) {
-    let s = v.session;
-    let ws = &s.workout;
-    let seg_line = |i: usize, text: Style| {
-        let seg = &ws.segments[i];
-        let p = |x: Option<f64>| x.map(|x| (x * s.ftp as f64 * s.intensity).round() as u32);
-        let power = match (p(seg.power_start), p(seg.power_end)) {
-            (Some(a), Some(b)) if a != b => format!("{a}→{b} W"),
-            (Some(a), _) => format!("{a} W"),
-            _ => "free".into(),
-        };
-        let color = seg.power_start.map_or(Color::DarkGray, |p| zone_color(p * s.intensity));
-        let cadence = seg.cadence.map_or(String::new(), |c| format!(" · {c} rpm"));
-        Line::from(vec![
-            Span::styled(format!("{} ", seg.kind.label()), Style::new().fg(color).bold()),
-            Span::styled(format!("{} · {power}{cadence}", fmt_duration(seg.duration)), text),
-        ])
-    };
-    let mut lines = vec![];
-    match seg_idx {
-        Some(i) => {
-            lines.push(Line::styled("NOW", HINT));
-            lines.push(seg_line(i, LABEL));
-            lines.push(Line::styled("NEXT", HINT));
-            lines.push(if i + 1 < ws.segments.len() { seg_line(i + 1, Style::new()) } else { Line::raw("— end —") });
-        }
-        None => lines.push(Line::styled("Workout complete", Style::new().green())),
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(format!(
-        "{} / {}   {:.2} km   {:.1} km/h",
-        fmt_duration(s.pos.min(ws.total_duration())),
-        fmt_duration(ws.total_duration()),
-        s.distance_m / 1000.0,
-        s.speed_kmh(),
-    ), LABEL));
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::DarkGray))
-        .title(Span::styled(format!(" SEGMENT {}/{} ", seg_idx.map_or(ws.segments.len(), |i| i + 1), ws.segments.len()), LABEL));
-    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -442,6 +403,7 @@ impl Widget for Chart<'_> {
         for i in 1..segs.len() {
             shaded[i] = color(segs[i].power_start) == color(segs[i - 1].power_end) && !shaded[i - 1];
         }
+        let mut heights = vec![0u16; inner.width as usize];
         for x in 0..inner.width {
             let t0 = view_start + x as f64 * col_secs;
             let t1 = t0 + col_secs;
@@ -475,6 +437,7 @@ impl Widget for Chart<'_> {
                 None if free => 4,
                 None => 0,
             };
+            heights[x as usize] = level.div_ceil(8) as u16;
             for row in 0..inner.height {
                 let filled = level.saturating_sub(row as usize * 8).min(8);
                 if filled == 0 {
@@ -490,37 +453,73 @@ impl Widget for Chart<'_> {
             }
         }
 
-        let Some(lane) = lane else { return };
         let mut runs = vec![];
         let mut x1 = 0;
         for run in col_seg.chunk_by(|a, b| a == b) {
             let x0 = x1;
             x1 += run.len() as u16;
-            if let Some(rpm) = run[0].and_then(|i| segs[i].cadence) {
-                runs.push((x0, x1, rpm));
+            if let Some(i) = run[0] {
+                runs.push((x0, x1, i));
             }
         }
-        // A target's label shows only if it fits in all its segments, so they look alike.
-        // Segments cut off by the window edge don't count.
-        let fits = |x0: u16, x1: u16, rpm: u16| x1 - x0 >= rpm.to_string().len() as u16;
         let clipped = |x0: u16, x1: u16| (x0 == 0 && view_start > 0.0) || (x1 == inner.width && follow);
-        let cramped: Vec<u16> =
-            runs.iter().filter(|&&(x0, x1, rpm)| !clipped(x0, x1) && !fits(x0, x1, rpm)).map(|r| r.2).collect();
-        for (x0, x1, rpm) in runs {
-            let style = if rpm >= HIGH_CADENCE {
+
+        let watts = |p: f64| (p * s.ftp as f64 * s.intensity).round() as u32;
+        let power_labels: Vec<_> = runs
+            .iter()
+            .filter_map(|&(x0, x1, i)| {
+                let seg = &segs[i];
+                let (a, b) = (watts(seg.power_start?), watts(seg.power_end?));
+                let label = if a == b { a.to_string() } else { format!("{a}–{b}") };
+                Some((x0, x1, label, zone_color(seg.power_start? * s.intensity)))
+            })
+            .collect();
+        let shown = consistent_labels(power_labels.iter().map(|(x0, x1, l, _)| (*x0, *x1, l.as_str())), clipped);
+        for ((x0, x1, label, color), show) in power_labels.iter().zip(shown) {
+            if !show {
+                continue;
+            }
+            let top = heights[*x0 as usize..*x1 as usize].iter().copied().max().unwrap_or(0);
+            let x = inner.x + x0 + (x1 - x0 - label.chars().count() as u16) / 2;
+            // Above the bar if there's room under the cursor row, otherwise on its top cell.
+            match (inner.bottom() - top).checked_sub(1).filter(|&y| y > inner.y) {
+                Some(y) => buf.set_string(x, y, label, Style::new().fg(*color).bold()),
+                None => buf.set_string(x, inner.bottom() - top.max(1), label, Style::new().fg(Color::Black).bg(*color).bold()),
+            };
+        }
+
+        let Some(lane) = lane else { return };
+        let cadence_labels: Vec<_> = runs
+            .iter()
+            .filter_map(|&(x0, x1, i)| segs[i].cadence.map(|rpm| (x0, x1, rpm, rpm.to_string())))
+            .collect();
+        let shown = consistent_labels(cadence_labels.iter().map(|(x0, x1, _, l)| (*x0, *x1, l.as_str())), clipped);
+        for ((x0, x1, rpm, label), show) in cadence_labels.iter().zip(shown) {
+            let style = if *rpm >= HIGH_CADENCE {
                 Style::new().fg(Color::Black).bg(Color::White).bold()
             } else {
                 Style::new().fg(Color::White).bg(Color::DarkGray).bold()
             };
-            for x in x0..x1 {
+            for x in *x0..*x1 {
                 buf[(lane.x + x, lane.y)].set_char(' ').set_style(style);
             }
-            let label = rpm.to_string();
-            if !cramped.contains(&rpm) && fits(x0, x1, rpm) {
-                buf.set_string(lane.x + x0 + (x1 - x0 - label.len() as u16) / 2, lane.y, &label, style);
+            if show {
+                buf.set_string(lane.x + x0 + (x1 - x0 - label.len() as u16) / 2, lane.y, label, style);
             }
         }
     }
+}
+
+/// Which labels to show: a label only appears if it fits in every segment carrying it,
+/// so equal segments look alike. Segments cut off by the window edge don't count.
+fn consistent_labels<'a>(
+    labels: impl Iterator<Item = (u16, u16, &'a str)> + Clone,
+    clipped: impl Fn(u16, u16) -> bool,
+) -> Vec<bool> {
+    let fits = |x0: u16, x1: u16, label: &str| x1 - x0 >= label.chars().count() as u16;
+    let cramped: Vec<&str> =
+        labels.clone().filter(|&(x0, x1, l)| !clipped(x0, x1) && !fits(x0, x1, l)).map(|(_, _, l)| l).collect();
+    labels.map(|(x0, x1, l)| !cramped.contains(&l) && fits(x0, x1, l)).collect()
 }
 
 /// Coarsest chart scale before it starts following the cursor, seconds per column.
