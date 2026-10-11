@@ -58,11 +58,9 @@ pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: b
         .or(cfg.weight)
         .filter(|w| (30.0..=200.0).contains(w))
         .ok_or_else(|| anyhow!("weight unknown: pass --weight <kg> (it will be saved to config)"))?;
-    if cfg.ftp != Some(ftp) || cfg.weight != Some(weight) {
-        cfg.ftp = Some(ftp);
-        cfg.weight = Some(weight);
-        cfg.save()?;
-    }
+    cfg.ftp = Some(ftp);
+    cfg.weight = Some(weight);
+    cfg.save()?;
 
     if !select {
         crate::resolve_devices(&mut cfg, &dev).await?;
@@ -126,6 +124,7 @@ async fn ride(
                     confirm_quit,
                     sim: dev.sim,
                     recording: rec_path.as_deref(),
+                    cadence_tolerance: cfg.cadence_tolerance,
                 },
             )
         })?;

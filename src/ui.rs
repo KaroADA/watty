@@ -43,6 +43,8 @@ struct BigValue<'a> {
     value: String,
     unit: &'a str,
     color: Color,
+    /// Bottom-left badge.
+    note: Option<Span<'a>>,
 }
 
 impl Widget for BigValue<'_> {
@@ -55,6 +57,10 @@ impl Widget for BigValue<'_> {
             block
         } else {
             block.title_bottom(Line::from(Span::styled(format!(" {} ", self.unit), Style::new().fg(Color::DarkGray))).right_aligned())
+        };
+        let block = match self.note {
+            Some(note) => block.title_bottom(Line::from(note).left_aligned()),
+            None => block,
         };
         let inner = block.inner(area);
         block.render(area, buf);
@@ -126,6 +132,7 @@ pub struct View<'a> {
     pub confirm_quit: bool,
     pub sim: bool,
     pub recording: Option<&'a str>,
+    pub cadence_tolerance: u16,
 }
 
 pub fn draw_ride(f: &mut Frame, v: &View) {
@@ -168,17 +175,17 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     };
     let num = |v: Option<u16>| v.map_or("-".to_string(), |v| v.to_string());
     let cols = Layout::horizontal([Constraint::Fill(1); 4]).split(row1);
-    f.render_widget(BigValue { title: "POWER 3s", value: num(power), unit: "W", color: power_color }, cols[0]);
+    f.render_widget(BigValue { title: "POWER 3s", value: num(power), unit: "W", color: power_color, note: None }, cols[0]);
     let target_color = target.map_or(Color::DarkGray, |t| zone_color(t as f64 / s.ftp as f64));
-    f.render_widget(BigValue { title: "TARGET", value: num(target), unit: "W", color: target_color }, cols[1]);
-    f.render_widget(BigValue { title: "HEART RATE", value: num(v.sensors.hr()), unit: "bpm", color: Color::LightRed }, cols[2]);
-    f.render_widget(BigValue { title: "CADENCE", value: num(v.sensors.cadence()), unit: "rpm", color: Color::LightCyan }, cols[3]);
+    f.render_widget(BigValue { title: "TARGET", value: num(target), unit: "W", color: target_color, note: None }, cols[1]);
+    f.render_widget(BigValue { title: "HEART RATE", value: num(v.sensors.hr()), unit: "bpm", color: Color::LightRed, note: None }, cols[2]);
+    draw_cadence(f, cols[3], v);
 
     let seg_idx = s.workout.segment_index_at(s.pos as f64);
     let seg_left = seg_idx.map_or(0, |i| s.workout.segments[i].end() - s.pos);
     let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).split(row2);
-    f.render_widget(BigValue { title: "SEGMENT LEFT", value: fmt_duration(seg_left), unit: "", color: Color::White }, cols[0]);
-    f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White }, cols[1]);
+    f.render_widget(BigValue { title: "SEGMENT LEFT", value: fmt_duration(seg_left), unit: "", color: Color::White, note: None }, cols[0]);
+    f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White, note: None }, cols[1]);
     draw_info(f, cols[2], v, seg_idx);
 
     f.render_widget(Chart { session: s }, chart);
@@ -211,6 +218,33 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     }
 }
 
+/// Cadence with the workout's target range and a faster/slower hint.
+fn draw_cadence(f: &mut Frame, area: Rect, v: &View) {
+    let s = v.session;
+    let cadence = v.sensors.cadence();
+    let value = cadence.map_or("-".to_string(), |c| c.to_string());
+    let Some(target) = s.workout.cadence_at(s.pos as f64).filter(|_| s.state != RunState::Finished) else {
+        let w = BigValue { title: "CADENCE", value, unit: "rpm", color: Color::LightCyan, note: None };
+        f.render_widget(w, area);
+        return;
+    };
+    let tol = v.cadence_tolerance;
+    let (lo, hi) = (target.saturating_sub(tol), target + tol);
+    let title = format!("CADENCE {lo}–{hi}");
+    let (color, note) = match cadence {
+        Some(c) if c < lo || c > hi => {
+            let off = if c < lo { lo - c } else { c - hi };
+            let color = if off > tol { Color::Red } else { Color::Yellow };
+            let text = if c < lo { " ▲ FASTER " } else { " ▼ SLOWER " };
+            let note = (s.state == RunState::Running).then(|| Span::styled(text, Style::new().fg(Color::Black).bg(color).bold()));
+            (color, note)
+        }
+        Some(_) => (Color::Green, Some(Span::styled(" ✓ ", Style::new().fg(Color::Green).bold()))),
+        None => (Color::LightCyan, None),
+    };
+    f.render_widget(BigValue { title: &title, value, unit: "rpm", color, note }, area);
+}
+
 fn draw_info(f: &mut Frame, area: Rect, v: &View, seg_idx: Option<usize>) {
     let s = v.session;
     let ws = &s.workout;
@@ -223,9 +257,10 @@ fn draw_info(f: &mut Frame, area: Rect, v: &View, seg_idx: Option<usize>) {
             _ => "free".into(),
         };
         let color = seg.power_start.map_or(Color::DarkGray, |p| zone_color(p * s.intensity));
+        let cadence = seg.cadence.map_or(String::new(), |c| format!(" · {c} rpm"));
         Line::from(vec![
             Span::styled(format!("{} ", seg.kind.label()), Style::new().fg(color).bold()),
-            Span::raw(format!("{} · {power}", fmt_duration(seg.duration))),
+            Span::raw(format!("{} · {power}{cadence}", fmt_duration(seg.duration))),
         ])
     };
     let mut lines = vec![];

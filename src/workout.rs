@@ -38,6 +38,8 @@ pub struct Segment {
     pub duration: u32,
     pub power_start: Option<f64>,
     pub power_end: Option<f64>,
+    /// Target cadence, rpm.
+    pub cadence: Option<u16>,
 }
 
 impl Segment {
@@ -91,9 +93,9 @@ impl Workout {
 
         let mut segments = Vec::new();
         let mut t = 0u32;
-        let mut push = |kind, duration: u32, a: Option<f64>, b: Option<f64>| {
+        let mut push = |kind, duration: u32, a: Option<f64>, b: Option<f64>, cadence: Option<u16>| {
             if duration > 0 {
-                segments.push(Segment { kind, start: t, duration, power_start: a, power_end: b });
+                segments.push(Segment { kind, start: t, duration, power_start: a, power_end: b, cadence });
                 t += duration;
             }
         };
@@ -101,6 +103,7 @@ impl Workout {
         for el in body.children().filter(|n| n.is_element()) {
             let tag = el.tag_name().name();
             let ctx = || format!("<{tag}> at line {}", doc.text_pos_at(el.range().start).row);
+            let cadence = rpm(&el, "Cadence").with_context(ctx)?;
             match tag {
                 "Warmup" | "Cooldown" | "Ramp" => {
                     let kind = match tag {
@@ -111,13 +114,13 @@ impl Workout {
                     let d = duration(&el, "Duration").with_context(ctx)?;
                     let lo = number(&el, "PowerLow").with_context(ctx)?;
                     let hi = number(&el, "PowerHigh").with_context(ctx)?;
-                    push(kind, d, Some(lo), Some(hi));
+                    push(kind, d, Some(lo), Some(hi), cadence);
                 }
                 // "SolidState" is a historical typo that Zwift itself accepts.
                 "SteadyState" | "SolidState" => {
                     let d = duration(&el, "Duration").with_context(ctx)?;
                     let p = number(&el, "Power").with_context(ctx)?;
-                    push(SegmentKind::Steady, d, Some(p), Some(p));
+                    push(SegmentKind::Steady, d, Some(p), Some(p), cadence);
                 }
                 "IntervalsT" => {
                     let repeat = number(&el, "Repeat").with_context(ctx)?.round() as u32;
@@ -125,14 +128,15 @@ impl Workout {
                     let off_d = duration(&el, "OffDuration").with_context(ctx)?;
                     let on_p = number(&el, "OnPower").with_context(ctx)?;
                     let off_p = number(&el, "OffPower").with_context(ctx)?;
+                    let resting = rpm(&el, "CadenceResting").with_context(ctx)?;
                     for _ in 0..repeat {
-                        push(SegmentKind::IntervalOn, on_d, Some(on_p), Some(on_p));
-                        push(SegmentKind::IntervalOff, off_d, Some(off_p), Some(off_p));
+                        push(SegmentKind::IntervalOn, on_d, Some(on_p), Some(on_p), cadence);
+                        push(SegmentKind::IntervalOff, off_d, Some(off_p), Some(off_p), resting);
                     }
                 }
                 "FreeRide" => {
                     let d = duration(&el, "Duration").with_context(ctx)?;
-                    push(SegmentKind::FreeRide, d, None, None);
+                    push(SegmentKind::FreeRide, d, None, None, cadence);
                 }
                 other => tracing::warn!("ignoring unsupported workout element <{other}>"),
             }
@@ -157,6 +161,10 @@ impl Workout {
 
     pub fn segment_at(&self, t: f64) -> Option<&Segment> {
         self.segment_index_at(t).map(|i| &self.segments[i])
+    }
+
+    pub fn cadence_at(&self, t: f64) -> Option<u16> {
+        self.segment_at(t).and_then(|s| s.cadence)
     }
 
     pub fn power_at(&self, t: f64) -> Option<f64> {
@@ -189,6 +197,13 @@ fn number(el: &roxmltree::Node, name: &str) -> Result<f64> {
         bail!("attribute {name}={raw:?} out of range");
     }
     Ok(v)
+}
+
+fn rpm(el: &roxmltree::Node, name: &str) -> Result<Option<u16>> {
+    if attr(el, name).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(number(el, name)?.round().min(250.0) as u16).filter(|&c| c > 0))
 }
 
 fn duration(el: &roxmltree::Node, name: &str) -> Result<u32> {
@@ -290,6 +305,17 @@ mod tests {
         assert_eq!(w.power_at(120.0), None);
         assert_eq!(w.segments[2].duration, 30);
         assert!(approx(w.power_at(170.0).unwrap(), 0.7));
+    }
+
+    #[test]
+    fn cadence_targets() {
+        let w = Workout::parse(include_str!("../workouts/spin_up_40.zwo")).unwrap();
+        assert_eq!(w.total_duration(), 2400);
+        assert_eq!(w.cadence_at(0.0), None);
+        assert_eq!(w.cadence_at(600.0), Some(105));
+        assert_eq!(w.cadence_at(660.0), Some(88));
+        assert_eq!(w.cadence_at(1500.0), None);
+        assert!(Workout::parse(r#"<workout_file><workout><SteadyState Duration="60" Power="0.5" Cadence="x"/></workout></workout_file>"#).is_err());
     }
 
     #[test]

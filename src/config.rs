@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// `~/.config/watty/config.toml`. Every field is optional; CLI flags win.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub ftp: Option<u32>,
     /// Rider weight, kg (virtual speed).
@@ -13,6 +13,19 @@ pub struct Config {
     pub trainer: Option<String>,
     /// Bluetooth address of the heart-rate sensor.
     pub hr: Option<String>,
+    /// Acceptable deviation from a workout's target cadence, ± rpm.
+    #[serde(default = "default_cadence_tolerance")]
+    pub cadence_tolerance: u16,
+}
+
+fn default_cadence_tolerance() -> u16 {
+    5
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { ftp: None, weight: None, trainer: None, hr: None, cadence_tolerance: default_cadence_tolerance() }
+    }
 }
 
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {

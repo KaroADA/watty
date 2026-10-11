@@ -1,0 +1,11 @@
+<workout_file>
+    <name>Spin-Up 40</name>
+    <description>Easy activation ride. 3 x 1 min high cadence (100-110 rpm) with 4 min easy (85-90 rpm), then 2 x 2 min at 80-85% FTP. ~40 min.</description>
+    <sportType>bike</sportType>
+    <workout>
+        <Warmup Duration="600" PowerLow="0.45" PowerHigh="0.65"/>
+        <IntervalsT Repeat="3" OnDuration="60" OffDuration="240" OnPower="0.62" OffPower="0.60" Cadence="105" CadenceResting="88"/>
+        <IntervalsT Repeat="2" OnDuration="120" OffDuration="120" OnPower="0.82" OffPower="0.50"/>
+        <Cooldown Duration="420" PowerLow="0.50" PowerHigh="0.40"/>
+    </workout>
+</workout_file>
