@@ -14,8 +14,8 @@ use tracing::{error, info};
 use crate::ble::Ble;
 use crate::config::{self, Config};
 use crate::recorder::Recorder;
-use crate::session::{Sensors, Session};
-use crate::ui::{self, Picker, View};
+use crate::session::{RunState, Sensors, Session};
+use crate::ui::{self, ChartZoom, Picker, View};
 use crate::workout::{Workout, fmt_duration};
 use crate::{DeviceArgs, Devices, start_devices};
 
@@ -106,6 +106,7 @@ async fn ride(
     let mut recorder: Option<Recorder> = None;
     let mut message: Option<(Instant, String)> = None;
     let mut confirm_quit = false;
+    let mut zoom = ChartZoom::new();
 
     let mut tick = interval(Duration::from_secs_f64(1.0 / dev.speed.max(0.1)));
     tick.set_missed_tick_behavior(MissedTickBehavior::Burst);
@@ -114,6 +115,7 @@ async fn ride(
     let mut hangup = signal(SignalKind::hangup())?;
 
     loop {
+        zoom.set(session.state == RunState::Running);
         let rec_path = recorder.as_ref().map(|r| r.csv_path().display().to_string());
         terminal.draw(|f| {
             ui::draw_ride(
@@ -125,6 +127,7 @@ async fn ride(
                     confirm_quit,
                     sim: dev.sim,
                     recording: rec_path.as_deref(),
+                    zoom: &zoom,
                     cadence_tolerance: cfg.cadence_tolerance,
                 },
             )
@@ -180,6 +183,7 @@ async fn ride(
                 }
             }
             _ = redraw.tick() => {}
+            _ = tokio::time::sleep(Duration::from_millis(33)), if zoom.animating() => {}
             _ = term.recv() => break,
             _ = hangup.recv() => break,
         }

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -52,11 +52,11 @@ impl Widget for BigValue<'_> {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(Color::DarkGray))
-            .title(Span::styled(format!(" {} ", self.title), Style::new().fg(Color::Gray)));
+            .title(Span::styled(format!(" {} ", self.title), LABEL));
         let block = if self.unit.is_empty() {
             block
         } else {
-            block.title_bottom(Line::from(Span::styled(format!(" {} ", self.unit), Style::new().fg(Color::DarkGray))).right_aligned())
+            block.title_bottom(Line::from(Span::styled(format!(" {} ", self.unit), LABEL)).right_aligned())
         };
         let block = match self.note {
             Some(note) => block.title_bottom(Line::from(note).left_aligned()),
@@ -97,6 +97,10 @@ impl Widget for BigValue<'_> {
 
 // ---------------------------------------------------------------- colors
 
+/// Small text that must stay readable from a few meters away.
+const LABEL: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
+const HINT: Style = Style::new().fg(Color::Gray);
+
 pub fn zone_color(frac: f64) -> Color {
     match frac {
         f if f < 0.56 => Color::Gray,
@@ -132,6 +136,7 @@ pub struct View<'a> {
     pub confirm_quit: bool,
     pub sim: bool,
     pub recording: Option<&'a str>,
+    pub zoom: &'a ChartZoom,
     pub cadence_tolerance: u16,
 }
 
@@ -148,7 +153,7 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     .areas(f.area());
 
     // header
-    let mut spans = vec![Span::styled(" watty ", Style::new().black().on_cyan().bold()), Span::raw(format!(" {}  ", s.workout.name))];
+    let mut spans = vec![Span::styled(" watty ", Style::new().black().on_cyan().bold()), Span::styled(format!(" {}  ", s.workout.name), LABEL)];
     spans.extend(link_span("Trainer", &v.sensors.trainer_link));
     spans.extend(link_span("HR", &v.sensors.hr_link));
     let erg = match v.sensors.applied {
@@ -188,7 +193,7 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White, note: None }, cols[1]);
     draw_info(f, cols[2], v, seg_idx);
 
-    f.render_widget(Chart { session: s }, chart);
+    f.render_widget(Chart { session: s, zoom: v.zoom.progress() }, chart);
 
     // status line
     let status_line = match s.state {
@@ -198,15 +203,15 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         RunState::Finished => Line::styled(" ✓ Workout complete — keep riding or press q", Style::new().green().bold()),
         RunState::Running => match v.message {
             Some((t, m)) if t.elapsed().as_secs() < 15 => Line::styled(format!(" {m}"), Style::new().fg(Color::Yellow)),
-            _ => Line::styled(v.recording.map_or(String::new(), |p| format!(" ● REC {p}")), Style::new().fg(Color::DarkGray)),
+            _ => Line::styled(v.recording.map_or(String::new(), |p| format!(" ● REC {p}")), HINT),
         },
     };
     f.render_widget(status_line, status);
-    let keys = if v.sim { "   s sim stop/start pedaling" } else { "" };
-    f.render_widget(
-        Line::styled(format!(" SPACE pause/resume   + / - intensity ±5%   n next segment   q quit{keys}"), Style::new().fg(Color::DarkGray)),
-        footer,
-    );
+    let mut keys = vec![("SPACE", "pause/resume"), ("+/-", "intensity ±5%"), ("n", "next segment"), ("q", "quit")];
+    if v.sim {
+        keys.push(("s", "sim stop/start pedaling"));
+    }
+    f.render_widget(key_hints(&keys), footer);
 
     if v.confirm_quit {
         let area = centered(f.area(), 44, 5);
@@ -218,6 +223,15 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
             area,
         );
     }
+}
+
+fn key_hints(keys: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (key, desc) in keys {
+        spans.push(Span::styled(key.to_string(), LABEL));
+        spans.push(Span::styled(format!(" {desc}   "), HINT));
+    }
+    Line::from(spans)
 }
 
 /// Cadence with the workout's target range and a faster/slower hint.
@@ -250,7 +264,7 @@ fn draw_cadence(f: &mut Frame, area: Rect, v: &View) {
 fn draw_info(f: &mut Frame, area: Rect, v: &View, seg_idx: Option<usize>) {
     let s = v.session;
     let ws = &s.workout;
-    let seg_line = |i: usize| {
+    let seg_line = |i: usize, text: Style| {
         let seg = &ws.segments[i];
         let p = |x: Option<f64>| x.map(|x| (x * s.ftp as f64 * s.intensity).round() as u32);
         let power = match (p(seg.power_start), p(seg.power_end)) {
@@ -262,31 +276,31 @@ fn draw_info(f: &mut Frame, area: Rect, v: &View, seg_idx: Option<usize>) {
         let cadence = seg.cadence.map_or(String::new(), |c| format!(" · {c} rpm"));
         Line::from(vec![
             Span::styled(format!("{} ", seg.kind.label()), Style::new().fg(color).bold()),
-            Span::raw(format!("{} · {power}{cadence}", fmt_duration(seg.duration))),
+            Span::styled(format!("{} · {power}{cadence}", fmt_duration(seg.duration)), text),
         ])
     };
     let mut lines = vec![];
     match seg_idx {
         Some(i) => {
-            lines.push(Line::styled("Now", Style::new().fg(Color::DarkGray)));
-            lines.push(seg_line(i));
-            lines.push(Line::styled("Next", Style::new().fg(Color::DarkGray)));
-            lines.push(if i + 1 < ws.segments.len() { seg_line(i + 1) } else { Line::raw("— end —") });
+            lines.push(Line::styled("NOW", HINT));
+            lines.push(seg_line(i, LABEL));
+            lines.push(Line::styled("NEXT", HINT));
+            lines.push(if i + 1 < ws.segments.len() { seg_line(i + 1, Style::new()) } else { Line::raw("— end —") });
         }
         None => lines.push(Line::styled("Workout complete", Style::new().green())),
     }
     lines.push(Line::raw(""));
-    lines.push(Line::raw(format!(
+    lines.push(Line::styled(format!(
         "{} / {}   {:.2} km   {:.1} km/h",
         fmt_duration(s.pos.min(ws.total_duration())),
         fmt_duration(ws.total_duration()),
         s.distance_m / 1000.0,
         s.speed_kmh(),
-    )));
+    ), LABEL));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(Color::DarkGray))
-        .title(Span::styled(format!(" SEGMENT {}/{} ", seg_idx.map_or(ws.segments.len(), |i| i + 1), ws.segments.len()), Style::new().fg(Color::Gray)));
+        .title(Span::styled(format!(" SEGMENT {}/{} ", seg_idx.map_or(ws.segments.len(), |i| i + 1), ws.segments.len()), LABEL));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -299,30 +313,103 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 /// Zone-colored target profile; the ridden part shows actual power instead.
 struct Chart<'a> {
     session: &'a Session,
+    /// 0 = whole workout, 1 = following the cursor.
+    zoom: f64,
+}
+
+const ZOOM_TIME: Duration = Duration::from_millis(600);
+
+/// Animated switch between the whole-workout chart and the view following the cursor.
+pub struct ChartZoom {
+    follow: bool,
+    since: Instant,
+}
+
+impl ChartZoom {
+    pub fn new() -> Self {
+        Self { follow: false, since: Instant::now().checked_sub(ZOOM_TIME).unwrap_or_else(Instant::now) }
+    }
+
+    fn linear(&self) -> f64 {
+        let t = (self.since.elapsed().as_secs_f64() / ZOOM_TIME.as_secs_f64()).min(1.0);
+        if self.follow { t } else { 1.0 - t }
+    }
+
+    pub fn set(&mut self, follow: bool) {
+        if follow == self.follow {
+            return;
+        }
+        // Continue from the current position if an animation is still running.
+        let p = self.linear();
+        let done = if follow { p } else { 1.0 - p };
+        self.follow = follow;
+        self.since = Instant::now().checked_sub(ZOOM_TIME.mul_f64(done)).unwrap_or_else(Instant::now);
+    }
+
+    pub fn animating(&self) -> bool {
+        self.since.elapsed() < ZOOM_TIME
+    }
+
+    fn progress(&self) -> f64 {
+        let p = self.linear();
+        p * p * (3.0 - 2.0 * p)
+    }
 }
 
 impl Widget for Chart<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let s = self.session;
+        let total = s.workout.total_duration().max(1) as f64;
+        let width = area.width.saturating_sub(2).max(1) as f64;
+        // Too long for a readable scale: while riding, show a window that follows the cursor.
+        let follow = self.zoom > 0.0 && total / width > MAX_COL_SECS;
+        let (view_start, col_secs) = if follow {
+            let span = width * MAX_COL_SECS;
+            let start = ((s.pos as f64 - span / 3.0) / MAX_COL_SECS).floor() * MAX_COL_SECS;
+            let start = start.clamp(0.0, total - span);
+            let lerp = |a: f64, b: f64| a + (b - a) * self.zoom;
+            let (a, b) = (lerp(0.0, start), lerp(total, start + span));
+            (a, (b - a) / width)
+        } else {
+            (0.0, total / width)
+        };
+        let title = if follow {
+            let end = (view_start + width * col_secs) as u32;
+            format!(" PROFILE {}–{} ", fmt_duration(view_start as u32), fmt_duration(end))
+        } else {
+            " PROFILE ".to_string()
+        };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(Color::DarkGray))
-            .title(Span::styled(" PROFILE ", Style::new().fg(Color::Gray)));
+            .title(Span::styled(title, LABEL));
         let inner = block.inner(area);
         block.render(area, buf);
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let total = s.workout.total_duration().max(1) as f64;
+        // Bottom row shows cadence targets, which power alone often doesn't reveal.
+        let has_cadence = s.workout.segments.iter().any(|g| g.cadence.is_some());
+        let lane = (has_cadence && inner.height > 3).then(|| Rect { y: inner.bottom() - 1, height: 1, ..inner });
+        let inner = if lane.is_some() { Rect { height: inner.height - 1, ..inner } } else { inner };
         let top = (s.workout.max_power() * s.intensity).max(1.0) * 1.1;
         let h = inner.height as f64;
         let eighths = ["", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
         let row_of = |frac: f64| -> u16 { ((frac / top) * h).ceil().clamp(1.0, h) as u16 };
 
         let ftp_row = inner.bottom() - row_of(1.0);
+        let segs = &s.workout.segments;
+        let col_seg: Vec<Option<usize>> =
+            (0..inner.width).map(|x| s.workout.segment_index_at(view_start + (x as f64 + 0.5) * col_secs)).collect();
+        // Dim every other segment in a run of the same color, so neighbors don't blend.
+        let color = |p: Option<f64>| p.map(|p| zone_color(p * s.intensity));
+        let mut shaded = vec![false; segs.len()];
+        for i in 1..segs.len() {
+            shaded[i] = color(segs[i].power_start) == color(segs[i - 1].power_end) && !shaded[i - 1];
+        }
         for x in 0..inner.width {
-            let t0 = x as f64 * total / inner.width as f64;
-            let t1 = (x + 1) as f64 * total / inner.width as f64;
+            let t0 = view_start + x as f64 * col_secs;
+            let t1 = t0 + col_secs;
             let mid = (t0 + t1) / 2.0;
             let cx = inner.x + x;
             let current = (s.pos as f64) >= t0 && (s.pos as f64) < t1;
@@ -340,7 +427,8 @@ impl Widget for Chart<'_> {
             let free = actual.flatten().is_none() && frac.is_none() && s.workout.segment_at(mid).is_some();
             let color = if current { Color::White } else { frac.map_or(Color::DarkGray, zone_color) };
             let mut style = Style::new().fg(color);
-            if past && actual.flatten().is_none() {
+            let shade = col_seg[x as usize].is_some_and(|i| shaded[i]);
+            if shade || (past && actual.flatten().is_none()) {
                 style = style.add_modifier(Modifier::DIM);
             }
 
@@ -366,8 +454,45 @@ impl Widget for Chart<'_> {
                 buf[(cx, inner.y)].set_char('▼').set_style(Style::new().fg(Color::White).bold());
             }
         }
+
+        let Some(lane) = lane else { return };
+        let mut runs = vec![];
+        let mut x1 = 0;
+        for run in col_seg.chunk_by(|a, b| a == b) {
+            let x0 = x1;
+            x1 += run.len() as u16;
+            if let Some(rpm) = run[0].and_then(|i| segs[i].cadence) {
+                runs.push((x0, x1, rpm));
+            }
+        }
+        // A target's label shows only if it fits in all its segments, so they look alike.
+        // Segments cut off by the window edge don't count.
+        let fits = |x0: u16, x1: u16, rpm: u16| x1 - x0 >= rpm.to_string().len() as u16;
+        let clipped = |x0: u16, x1: u16| (x0 == 0 && view_start > 0.0) || (x1 == inner.width && follow);
+        let cramped: Vec<u16> =
+            runs.iter().filter(|&&(x0, x1, rpm)| !clipped(x0, x1) && !fits(x0, x1, rpm)).map(|r| r.2).collect();
+        for (x0, x1, rpm) in runs {
+            let style = if rpm >= HIGH_CADENCE {
+                Style::new().fg(Color::Black).bg(Color::White).bold()
+            } else {
+                Style::new().fg(Color::White).bg(Color::DarkGray).bold()
+            };
+            for x in x0..x1 {
+                buf[(lane.x + x, lane.y)].set_char(' ').set_style(style);
+            }
+            let label = rpm.to_string();
+            if !cramped.contains(&rpm) && fits(x0, x1, rpm) {
+                buf.set_string(lane.x + x0 + (x1 - x0 - label.len() as u16) / 2, lane.y, &label, style);
+            }
+        }
     }
 }
+
+/// Coarsest chart scale before it starts following the cursor, seconds per column.
+const MAX_COL_SECS: f64 = 15.0;
+
+/// Cadence targets at or above this stand out in the chart's cadence row.
+const HIGH_CADENCE: u16 = 95;
 
 // ---------------------------------------------------------------- device picker
 
@@ -422,7 +547,7 @@ pub fn draw_picker(f: &mut Frame, p: &mut Picker) {
         .highlight_symbol("▶ ");
     f.render_stateful_widget(list_widget, list, &mut p.state);
     f.render_widget(
-        Line::styled(" ↑/↓ select   t = trainer   h = HR   Enter = start   q = quit", Style::new().fg(Color::DarkGray)),
+        key_hints(&[("↑/↓", "select"), ("t", "trainer"), ("h", "HR"), ("Enter", "start"), ("q", "quit")]),
         help,
     );
 }
