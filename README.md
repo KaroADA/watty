@@ -16,6 +16,13 @@ cargo build --release
 - Config: `~/.config/watty/config.toml` (`ftp`, `weight`, `trainer`, `hr`, `cadence_tolerance`, `auto_pause`, `max_hr`, `hr_zones`, `segment_warning`, `keep_awake`, `soft_start`, `workouts_dir`), written by `ride`.
 - Workouts: the home screen lists `.zwo` files from `~/.local/share/watty/workouts` (or `workouts_dir`); a new folder gets the example workouts. `Enter` rides the selected one, `s` does a test ride on the simulator, and after the ride you're back on the list.
 - Cadence targets come from `Cadence` / `CadenceResting` in `.zwo`; acceptable range is target ± `cadence_tolerance` rpm (default 5).
+- Activities tab: a month calendar of rides (●) and planned workouts (○) with each ride's time, distance, average power, NP, HR and kJ. `a` plans a workout on the selected day, `d` removes it, `Enter` rides it, `r` resumes an interrupted ride; `[`/`]` change month, `t` jumps to today. Today's planned workouts are marked on the Workouts tab.
+- Plan: `~/.local/share/watty/plan.toml`, also editable by hand:
+  ```toml
+  [[workout]]
+  date = 2026-10-16
+  file = "sweet_spot_3x10.zwo"   # relative to the workouts folder, or absolute
+  ```
 - Rides: `~/.local/share/watty/rides/` (CSV journal + TCX); simulator rides go to `rides/test/`. Quitting asks whether to save or discard the ride. Each ride has a `.json` next to its CSV with the workout and progress: if the latest ride was interrupted (crash or quit before the end) less than 3 h ago, the home screen offers to resume it, paused where it stopped. Log: `~/.local/share/watty/watty.log`.
 - Heart-rate zones: set `max_hr` (zones at 60/70/80/90%) or `hr_zones = [z1, z2, z3, z4]` with each zone's upper bound in bpm; the HR panel is then colored by zone.
 - The last `segment_warning` seconds of a segment (default 10, `0` = off) show a popup with a countdown and the next segment's targets.

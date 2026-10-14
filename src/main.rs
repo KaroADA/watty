@@ -1,10 +1,12 @@
 mod awake;
 mod ble;
+mod calendar;
 mod config;
 mod devices;
 mod history;
 mod home;
 mod library;
+mod plan;
 mod protocol;
 mod recorder;
 mod ride;

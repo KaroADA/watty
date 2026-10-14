@@ -1,5 +1,7 @@
 //! Home screen: pick a workout and ride it, then come back here.
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -11,21 +13,23 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::DeviceArgs;
+use crate::calendar::{Action, Calendar};
 use crate::config::{self, Config};
 use crate::history::{self, RideFile};
 use crate::library::{self, Entry};
 use crate::recorder::{read_journal, save_meta};
 use crate::ride::{self, RideSetup, key_press, spawn_keys};
 use crate::session::Session;
-use crate::ui::{Chart, HINT, LABEL, centered, key_hints};
+use crate::ui::{Chart, HINT, LABEL, centered, key_hints, panel};
 use crate::workout::{Workout, fmt_duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Workouts,
+    Activities,
 }
 
-const TABS: [(Tab, &str); 1] = [(Tab::Workouts, "Workouts")];
+const TABS: [(Tab, &str); 2] = [(Tab::Workouts, "Workouts"), (Tab::Activities, "Activities")];
 
 struct Popup {
     title: String,
@@ -42,6 +46,7 @@ struct Home {
     rides: Vec<RideFile>,
     /// Interrupted ride offered for resuming, with seconds ridden.
     resume: Option<(RideFile, u32)>,
+    calendar: Calendar,
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
@@ -61,9 +66,16 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
         popup: None,
         rides: vec![],
         resume: None,
+        calendar: Calendar::new(),
     };
     h.reload_workouts();
     h.reload_rides();
+    h.reload_plan();
+    let dir = h.cfg.workouts_dir();
+    let today: Vec<PathBuf> = h.calendar.planned_today().map(|p| p.path(&dir)).collect();
+    if let Some(i) = h.workouts.iter().position(|e| today.contains(&e.path)) {
+        h.list.select(Some(i));
+    }
     h.resume = history::resume_offer(&h.rides).map(|r| {
         let ridden = read_journal(&r.csv).map_or(0, |(_, s)| s.len() as u32);
         (r.clone(), ridden)
@@ -107,13 +119,17 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
             }
             continue;
         }
+        if h.tab == Tab::Activities && h.calendar.picking() {
+            h.calendar_key(terminal, keys, code).await;
+            continue;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-            KeyCode::Tab => h.tab = next_tab(h.tab, 1),
-            KeyCode::BackTab => h.tab = next_tab(h.tab, TABS.len() - 1),
+            KeyCode::Tab => h.switch(next_tab(h.tab, 1)),
+            KeyCode::BackTab => h.switch(next_tab(h.tab, TABS.len() - 1)),
             KeyCode::Char(c @ '1'..='9') => {
                 if let Some((t, _)) = TABS.get(c as usize - '1' as usize) {
-                    h.tab = *t;
+                    h.switch(*t);
                 }
             }
             _ => match h.tab {
@@ -125,6 +141,7 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
                     KeyCode::Char('s') => h.start(terminal, keys, true).await,
                     _ => {}
                 },
+                Tab::Activities => h.calendar_key(terminal, keys, code).await,
             },
         }
     }
@@ -136,6 +153,39 @@ fn next_tab(tab: Tab, step: usize) -> Tab {
 }
 
 impl Home {
+    fn switch(&mut self, tab: Tab) {
+        if tab == Tab::Activities && self.tab != tab {
+            self.reload_plan();
+        }
+        self.tab = tab;
+    }
+
+    /// Picks up hand edits of plan.toml.
+    fn reload_plan(&mut self) {
+        if let Err(e) = self.calendar.reload_plan() {
+            self.error("Cannot read the plan", format!("{e:#}"));
+        }
+    }
+
+    async fn calendar_key(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, code: KeyCode) {
+        let dir = self.cfg.workouts_dir();
+        match self.calendar.key(code, &self.workouts, &self.rides, &dir) {
+            Action::None => {}
+            Action::Error(title, text) => self.error(&title, text),
+            Action::Resume(ride) => self.resume_ride(terminal, keys, ride).await,
+            Action::Ride(path) => {
+                let loaded = match self.workouts.iter().find(|e| e.path == path) {
+                    Some(e) => e.workout.clone().map_err(|e| anyhow::anyhow!(e)),
+                    None => Workout::load(&path),
+                };
+                match loaded {
+                    Ok(w) => self.start_workout(terminal, keys, path, w, false).await,
+                    Err(e) => self.error("Cannot load workout", format!("{e:#}")),
+                }
+            }
+        }
+    }
+
     fn reload_workouts(&mut self) {
         match library::scan(&self.cfg.workouts_dir()) {
             Ok(w) => self.workouts = w,
@@ -159,15 +209,25 @@ impl Home {
 
     async fn start(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, sim: bool) {
         let Some(entry) = self.selected() else { return };
-        let workout = match &entry.workout {
-            Ok(w) => w.clone(),
-            Err(e) => return self.error("Invalid workout", e.clone()),
-        };
+        let path = entry.path.clone();
+        match entry.workout.clone() {
+            Ok(w) => self.start_workout(terminal, keys, path, w, sim).await,
+            Err(e) => self.error("Invalid workout", e),
+        }
+    }
+
+    async fn start_workout(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        keys: &mut mpsc::UnboundedReceiver<Event>,
+        path: PathBuf,
+        workout: Workout,
+        sim: bool,
+    ) {
         let (Some(ftp), Some(weight)) = (self.cfg.ftp, self.cfg.weight) else {
             return self.error("FTP and weight needed", "Set `ftp` and `weight` in ~/.config/watty/config.toml.".into());
         };
-        let workout_path = Some(entry.path.clone());
-        let setup = RideSetup { workout, workout_path, resume: None, ftp, weight, select: false, dev: DeviceArgs::configured(sim) };
+        let setup = RideSetup { workout, workout_path: Some(path), resume: None, ftp, weight, select: false, dev: DeviceArgs::configured(sim) };
         self.ride(terminal, keys, setup).await;
     }
 
@@ -231,6 +291,14 @@ fn draw(f: &mut Frame, h: &mut Home) {
             draw_workouts(f, body, h);
             keys.splice(0..0, [("↑/↓", "select"), ("Enter", "ride"), ("s", "test ride (simulator)"), ("r", "reload")]);
         }
+        Tab::Activities => {
+            let dir = h.cfg.workouts_dir();
+            h.calendar.draw(f, body, &h.rides, &h.workouts, &dir);
+            keys.splice(
+                0..0,
+                [("←→↑↓", "day"), ("[ ]", "month"), ("t", "today"), ("a", "plan"), ("d", "unplan"), ("Enter", "ride planned"), ("r", "resume")],
+            );
+        }
     }
     f.render_widget(key_hints(&keys), footer);
 
@@ -242,16 +310,10 @@ fn draw(f: &mut Frame, h: &mut Home) {
     }
 }
 
-fn panel(title: &str) -> Block<'static> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::DarkGray))
-        .title(Span::styled(format!(" {title} "), LABEL))
-}
-
 fn draw_workouts(f: &mut Frame, area: Rect, h: &mut Home) {
     let [list_area, detail] = Layout::horizontal([Constraint::Percentage(35), Constraint::Fill(1)]).areas(area);
     let dir = h.cfg.workouts_dir();
+    let today: Vec<PathBuf> = h.calendar.planned_today().map(|p| p.path(&dir)).collect();
     let items: Vec<ListItem> = h
         .workouts
         .iter()
@@ -259,6 +321,7 @@ fn draw_workouts(f: &mut Frame, area: Rect, h: &mut Home) {
             Ok(w) => ListItem::new(Line::from(vec![
                 Span::raw(format!("{:<30} ", e.title())),
                 Span::styled(fmt_duration(w.total_duration()), HINT),
+                Span::styled(if today.contains(&e.path) { "  ○ today" } else { "" }, Style::new().fg(Color::Yellow)),
             ])),
             Err(_) => ListItem::new(Line::styled(format!("{} (invalid)", e.file_name()), Style::new().red())),
         })

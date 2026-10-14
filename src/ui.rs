@@ -352,6 +352,13 @@ fn hr_zone_color(zone: u8) -> Color {
     }
 }
 
+pub fn panel(title: &str) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(Span::styled(format!(" {title} "), LABEL))
+}
+
 pub fn key_hints(keys: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (key, desc) in keys {
