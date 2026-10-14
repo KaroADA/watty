@@ -265,10 +265,10 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     draw_upcoming(f, chart, v);
 
     if v.confirm_quit {
-        let area = centered(f.area(), 44, 5);
+        let area = centered(f.area(), 56, 5);
         f.render_widget(Clear, area);
         f.render_widget(
-            Paragraph::new(vec![Line::raw(""), Line::from("Quit and save the ride?  [y] yes   [n] no").bold()])
+            Paragraph::new(vec![Line::raw(""), Line::from("Quit?  [y] save ride   [d] discard   [n] cancel").bold()])
                 .alignment(Alignment::Center)
                 .block(Block::bordered().border_type(BorderType::Double).border_style(Style::new().yellow())),
             area,

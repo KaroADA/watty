@@ -70,6 +70,22 @@ impl Recorder {
         write_atomic(&self.tcx_path, &tcx(self.start, &self.samples))
     }
 
+    /// Deletes everything recorded so far.
+    pub fn discard(self) -> Result<()> {
+        let Self { csv, csv_path, tcx_path, .. } = self;
+        drop(csv);
+        std::fs::remove_file(&csv_path).with_context(|| format!("cannot remove {}", csv_path.display()))?;
+        for path in [tcx_path.clone(), tcx_path.with_extension("tcx.tmp")] {
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("cannot remove {}", path.display()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<usize> {
         self.csv.flush()?;
         self.csv.get_ref().sync_all()?;
@@ -236,6 +252,17 @@ mod tests {
         assert!(xml.contains("<ns3:Watts>200</ns3:Watts>"));
         assert!(xml.contains("<HeartRateBpm><Value>120</Value></HeartRateBpm>"));
         assert_eq!(xml.matches("<Trackpoint>").count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn discard_removes_files() {
+        let dir = std::env::temp_dir().join(format!("watty-discard-{}", std::process::id()));
+        let mut r = Recorder::create(&dir, "Test").unwrap();
+        r.record(sample(1, Some(200), None)).unwrap();
+        r.write_tcx().unwrap();
+        r.discard().unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

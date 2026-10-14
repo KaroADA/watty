@@ -120,6 +120,9 @@ pub async fn ride(
     let mut recorder: Option<Recorder> = None;
     let mut message: Option<(Instant, String)> = None;
     let mut confirm_quit = false;
+    let mut discard = false;
+    // Test rides stay out of the ride history.
+    let rides_dir = if dev.sim { config::rides_dir().join("test") } else { config::rides_dir() };
     let mut zoom = ChartZoom::new();
 
     let mut tick = interval(Duration::from_secs_f64(1.0 / dev.speed.max(0.1)));
@@ -155,6 +158,10 @@ pub async fn ride(
                 if confirm_quit {
                     match code {
                         KeyCode::Char('y') | KeyCode::Char('q') | KeyCode::Enter => break,
+                        KeyCode::Char('d') => {
+                            discard = true;
+                            break;
+                        }
                         KeyCode::Char('n') | KeyCode::Esc => confirm_quit = false,
                         _ => {}
                     }
@@ -184,7 +191,7 @@ pub async fn ride(
             _ = tick.tick() => {
                 if let Some(sample) = session.tick(&sensors) {
                     if recorder.is_none() {
-                        match Recorder::create(&config::rides_dir(), &session.workout.name) {
+                        match Recorder::create(&rides_dir, &session.workout.name) {
                             Ok(r) => recorder = Some(r),
                             Err(e) => {
                                 error!("recorder: {e:#}");
@@ -223,7 +230,12 @@ pub async fn ride(
         fmt_duration(session.pos.min(session.workout.total_duration())),
         fmt_duration(session.workout.total_duration()),
     );
-    if let Some(r) = recorder {
+    if let Some(r) = recorder.take_if(|_| discard) {
+        match r.discard() {
+            Ok(()) => out += "\nride discarded",
+            Err(e) => out += &format!("\ncannot discard: {e:#}"),
+        }
+    } else if let Some(r) = recorder {
         let (csv, tcx) = (r.csv_path().to_path_buf(), r.tcx_path().to_path_buf());
         match r.finish() {
             Ok(n) => out += &format!("\n{n} samples\nTCX: {}\nCSV: {}", tcx.display(), csv.display()),

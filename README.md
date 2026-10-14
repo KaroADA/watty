@@ -16,7 +16,7 @@ cargo build --release
 - Config: `~/.config/watty/config.toml` (`ftp`, `weight`, `trainer`, `hr`, `cadence_tolerance`, `auto_pause`, `max_hr`, `hr_zones`, `segment_warning`, `keep_awake`, `soft_start`, `workouts_dir`), written by `ride`.
 - Workouts: the home screen lists `.zwo` files from `~/.local/share/watty/workouts` (or `workouts_dir`); a new folder gets the example workouts. `Enter` rides the selected one, `s` does a test ride on the simulator, and after the ride you're back on the list.
 - Cadence targets come from `Cadence` / `CadenceResting` in `.zwo`; acceptable range is target ± `cadence_tolerance` rpm (default 5).
-- Rides: `~/.local/share/watty/rides/` (CSV journal + TCX). Log: `~/.local/share/watty/watty.log`.
+- Rides: `~/.local/share/watty/rides/` (CSV journal + TCX); simulator rides go to `rides/test/`. Quitting asks whether to save or discard the ride. Log: `~/.local/share/watty/watty.log`.
 - Heart-rate zones: set `max_hr` (zones at 60/70/80/90%) or `hr_zones = [z1, z2, z3, z4]` with each zone's upper bound in bpm; the HR panel is then colored by zone.
 - The last `segment_warning` seconds of a segment (default 10, `0` = off) show a popup with a countdown and the next segment's targets.
 - `keep_awake` (default on) stops the screen from dimming or locking during a ride: via `org.freedesktop.ScreenSaver` (GNOME, KDE, Xfce), `systemd-inhibit` (e.g. hypridle), and on Omarchy by tagging the terminal window `noidle`.
