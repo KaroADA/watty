@@ -1,7 +1,7 @@
 //! Activities tab: a month of past rides and planned workouts.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::{Datelike, Local, Months, NaiveDate};
@@ -12,10 +12,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+use crate::activity::{RideView, power_chart};
+use crate::config::Config;
 use crate::history::{self, RideFile, RideStats};
 use crate::library::Entry;
 use crate::plan::{Plan, plan_path};
-use crate::recorder::read_journal;
+use crate::recorder::{delete_ride, read_journal};
 use crate::ui::{HINT, LABEL, centered, panel};
 use crate::workout::fmt_duration;
 
@@ -25,15 +27,28 @@ pub enum Action {
     None,
     Ride(PathBuf),
     Resume(RideFile),
+    /// A ride was deleted, so the ride list needs reloading.
+    Deleted,
     Error(String, String),
 }
+
+/// Stats, power and target per second of a ride, for the day list.
+type Summary = (RideStats, Vec<Option<u16>>, Vec<Option<u16>>);
+
+/// Tallest power chart in the day list.
+const MAX_LIST_CHART_ROWS: u16 = 14;
 
 pub struct Calendar {
     pub day: NaiveDate,
     pub plan: Plan,
-    stats: HashMap<PathBuf, Option<RideStats>>,
+    summaries: HashMap<PathBuf, Option<Summary>>,
     /// Workout picker for planning the selected day.
     adding: Option<ListState>,
+    /// Selected ride in the day list, while it has focus.
+    focus: Option<usize>,
+    open: Option<RideView>,
+    /// Ride waiting for the user to confirm its deletion.
+    deleting: Option<RideFile>,
 }
 
 fn today() -> NaiveDate {
@@ -42,11 +57,49 @@ fn today() -> NaiveDate {
 
 impl Calendar {
     pub fn new() -> Self {
-        Self { day: today(), plan: Plan::default(), stats: HashMap::new(), adding: None }
+        Self { day: today(), plan: Plan::default(), summaries: HashMap::new(), adding: None, focus: None, open: None, deleting: None }
     }
 
-    pub fn picking(&self) -> bool {
-        self.adding.is_some()
+    /// Keys like `q` and `Esc` step back inside the calendar instead of leaving the app.
+    pub fn captures_keys(&self) -> bool {
+        self.adding.is_some() || self.focus.is_some() || self.open.is_some() || self.deleting.is_some()
+    }
+
+    pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        if self.deleting.is_some() {
+            vec![("y", "delete"), ("n", "keep")]
+        } else if self.open.is_some() {
+            vec![("x", "delete"), ("Esc", "back")]
+        } else if self.adding.is_some() {
+            vec![("↑/↓", "select"), ("Enter", "plan"), ("Esc", "cancel")]
+        } else if self.focus.is_some() {
+            vec![("↑/↓", "select"), ("Enter", "open"), ("x", "delete"), ("r", "resume"), ("Esc", "back")]
+        } else {
+            vec![
+                ("←→↑↓", "day"),
+                ("[ ]", "month"),
+                ("t", "today"),
+                ("Enter", "activities"),
+                ("a", "plan"),
+                ("d", "unplan"),
+                ("p", "ride planned"),
+                ("r", "resume"),
+            ]
+        }
+    }
+
+    fn day_rides<'a>(&self, rides: &'a [RideFile]) -> Vec<&'a RideFile> {
+        rides.iter().filter(|r| r.started.date() == self.day).collect()
+    }
+
+    fn open_ride(&mut self, ride: &RideFile, cfg: &Config) -> Action {
+        match RideView::load(ride, cfg.ftp, cfg.hr_zones().ok().flatten()) {
+            Ok(v) => {
+                self.open = Some(v);
+                Action::None
+            }
+            Err(e) => Action::Error("Cannot open ride".into(), format!("{e:#}")),
+        }
     }
 
     pub fn reload_plan(&mut self) -> Result<()> {
@@ -59,14 +112,70 @@ impl Calendar {
         self.plan.workouts.iter().filter(move |p| p.date == today)
     }
 
-    fn stats(&mut self, ride: &RideFile) -> Option<&RideStats> {
-        self.stats
+    fn summary(&mut self, ride: &RideFile) -> Option<&Summary> {
+        self.summaries
             .entry(ride.csv.clone())
-            .or_insert_with(|| read_journal(&ride.csv).ok().map(|(_, s)| history::stats(&s)))
+            .or_insert_with(|| {
+                let (_, samples) = read_journal(&ride.csv).ok()?;
+                Some((history::stats(&samples), samples.iter().map(|s| s.power).collect(), samples.iter().map(|s| s.target).collect()))
+            })
             .as_ref()
     }
 
-    pub fn key(&mut self, code: KeyCode, workouts: &[Entry], rides: &[RideFile], workouts_dir: &Path) -> Action {
+    fn stats(&mut self, ride: &RideFile) -> Option<&RideStats> {
+        self.summary(ride).map(|(s, _, _)| s)
+    }
+
+    pub fn key(&mut self, code: KeyCode, workouts: &[Entry], rides: &[RideFile], cfg: &Config) -> Action {
+        let workouts_dir = &cfg.workouts_dir();
+        if self.deleting.is_some() {
+            match code {
+                KeyCode::Char('y') => {
+                    let Some(ride) = self.deleting.take() else { return Action::None };
+                    self.summaries.remove(&ride.csv);
+                    self.open = None;
+                    let left = self.day_rides(rides).len().saturating_sub(1);
+                    self.focus = self.focus.filter(|_| left > 1).map(|i| i.min(left - 1));
+                    return match delete_ride(&ride.csv) {
+                        Ok(()) => Action::Deleted,
+                        Err(e) => Action::Error("Cannot delete ride".into(), format!("{e:#}")),
+                    };
+                }
+                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => self.deleting = None,
+                _ => {}
+            }
+            return Action::None;
+        }
+        if let Some(view) = &self.open {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.open = None,
+                KeyCode::Char('x') => self.deleting = Some(view.ride.clone()),
+                _ => {}
+            }
+            return Action::None;
+        }
+        if let Some(i) = self.focus {
+            let day_rides = self.day_rides(rides);
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => self.focus = Some(i.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Char('j') => self.focus = Some((i + 1).min(day_rides.len().saturating_sub(1))),
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    if let Some(r) = day_rides.get(i) {
+                        let r = (*r).clone();
+                        return self.open_ride(&r, cfg);
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if let Some(r) = day_rides.get(i).filter(|r| r.resumable()) {
+                        return Action::Resume((*r).clone());
+                    }
+                }
+                KeyCode::Char('x') => self.deleting = day_rides.get(i).map(|r| (*r).clone()),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h') => self.focus = None,
+                _ => {}
+            }
+            return Action::None;
+        }
         if let Some(list) = &mut self.adding {
             let valid: Vec<&Entry> = workouts.iter().filter(|e| e.workout.is_ok()).collect();
             match code {
@@ -104,6 +213,17 @@ impl Calendar {
                 }
             }
             KeyCode::Enter => {
+                let day_rides = self.day_rides(rides);
+                match day_rides.as_slice() {
+                    [] => {}
+                    [one] => {
+                        let one = (*one).clone();
+                        return self.open_ride(&one, cfg);
+                    }
+                    _ => self.focus = Some(0),
+                }
+            }
+            KeyCode::Char('p') => {
                 let next = self.plan.on(day).into_iter().map(|i| &self.plan.workouts[i]).find(|p| !p.done(rides));
                 if let Some(p) = next {
                     return Action::Ride(p.path(workouts_dir));
@@ -126,12 +246,37 @@ impl Calendar {
         }
     }
 
-    pub fn draw(&mut self, f: &mut Frame, area: Rect, rides: &[RideFile], workouts: &[Entry], workouts_dir: &Path) {
+    pub fn draw(&mut self, f: &mut Frame, area: Rect, rides: &[RideFile], workouts: &[Entry], cfg: &Config) {
+        if let Some(view) = &self.open {
+            view.draw(f, area);
+        } else {
+            self.draw_calendar(f, area, rides, workouts, cfg);
+        }
+        if let Some(ride) = &self.deleting {
+            let popup = centered(f.area(), 56, 6);
+            let block = panel("Delete ride").border_type(BorderType::Double).border_style(Style::new().fg(Color::Red));
+            let lines = vec![
+                Line::raw(""),
+                Line::styled(format!(" {}  {}", ride.started.format("%a %-d %b %H:%M"), ride.name()), LABEL),
+                Line::from(vec![
+                    Span::raw(" Delete it for good?  "),
+                    Span::styled("[y]", LABEL),
+                    Span::raw(" yes   "),
+                    Span::styled("[n]", LABEL),
+                    Span::raw(" no"),
+                ]),
+            ];
+            f.render_widget(Clear, popup);
+            f.render_widget(Paragraph::new(lines).block(block), popup);
+        }
+    }
+
+    fn draw_calendar(&mut self, f: &mut Frame, area: Rect, rides: &[RideFile], workouts: &[Entry], cfg: &Config) {
         let [left, details] = Layout::horizontal([Constraint::Length(7 * CELL as u16 + 2), Constraint::Fill(1)]).areas(area);
         let [month, summary] = Layout::vertical([Constraint::Length(16), Constraint::Min(0)]).areas(left);
         self.draw_month(f, month, rides);
         self.draw_summary(f, summary, rides);
-        self.draw_day(f, details, rides, workouts, workouts_dir);
+        self.draw_day(f, details, rides, workouts, cfg);
         if let Some(list) = &mut self.adding {
             let items: Vec<ListItem> = workouts
                 .iter()
@@ -211,14 +356,24 @@ impl Calendar {
         f.render_widget(Paragraph::new(lines).block(panel("This month")), area);
     }
 
-    fn draw_day(&mut self, f: &mut Frame, area: Rect, rides: &[RideFile], workouts: &[Entry], workouts_dir: &Path) {
-        let mut lines = vec![];
-        let day = self.day;
-        for r in rides.iter().filter(|r| r.started.date() == day) {
+    fn draw_day(&mut self, f: &mut Frame, area: Rect, rides: &[RideFile], workouts: &[Entry], cfg: &Config) {
+        let block = panel(&self.day.format("%A, %-d %B").to_string());
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let width = inner.width.saturating_sub(2);
+        let workouts_dir = cfg.workouts_dir();
+
+        let day_rides = self.day_rides(rides);
+        let mut texts: Vec<Vec<Line>> = vec![];
+        let mut charted = vec![];
+        for (i, r) in day_rides.iter().enumerate() {
+            let mut lines = vec![];
             let finished = r.meta.as_ref().is_none_or(|m| m.finished);
+            let selected = self.focus == Some(i);
+            let name_style = if selected { LABEL.add_modifier(Modifier::REVERSED) } else { LABEL };
             lines.push(Line::from(vec![
-                Span::styled("● ", Style::new().fg(Color::Green)),
-                Span::styled(format!("{}  {}", r.started.format("%H:%M"), r.name()), LABEL),
+                Span::styled(if selected { "▶ " } else { "● " }, Style::new().fg(Color::Green)),
+                Span::styled(format!("{}  {}", r.started.format("%H:%M"), r.name()), name_style),
             ]));
             if !finished {
                 let resume = if r.resumable() { " · [r] resume" } else { "" };
@@ -237,13 +392,15 @@ impl Calendar {
                 }
                 None => vec!["cannot read the ride".into()],
             };
-            let width = area.width.saturating_sub(4) as usize;
-            lines.extend(join_wrapped(&parts, " · ", width).into_iter().map(|l| Line::styled(format!("  {l}"), HINT)));
-            lines.push(Line::raw(""));
+            lines.extend(join_wrapped(&parts, " · ", width as usize).into_iter().map(|l| Line::styled(format!("  {l}"), HINT)));
+            texts.push(lines);
+            charted.push(self.summary(r).is_some_and(|(_, p, _)| p.iter().any(Option::is_some)) && width >= 10);
         }
+
+        let mut plan_lines = vec![];
         for i in self.plan.on(self.day) {
             let p = &self.plan.workouts[i];
-            let path = p.path(workouts_dir);
+            let path = p.path(&workouts_dir);
             let entry = workouts.iter().find(|e| e.path == path);
             let name = entry.map_or_else(|| p.file.display().to_string(), |e| e.title());
             let (mark, style) = if p.done(rides) { ("✓ ", Color::Green) } else { ("○ ", Color::Yellow) };
@@ -254,18 +411,41 @@ impl Calendar {
                 None if !path.exists() => spans.push(Span::styled("  file not found", Style::new().fg(Color::Red))),
                 None => {}
             }
-            lines.push(Line::from(spans));
+            plan_lines.push(Line::from(spans));
         }
-        if lines.is_empty() {
-            lines.push(Line::styled("Nothing on this day.", HINT));
+        if day_rides.is_empty() && plan_lines.is_empty() {
+            plan_lines.push(Line::styled("Nothing on this day.", HINT));
         }
-        let title = self.day.format("%A, %-d %B").to_string();
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(panel(&title)), area);
+
+        // Charts share whatever height the text leaves.
+        let text_rows: u16 = texts.iter().map(|t| t.len() as u16 + 1).sum::<u16>() + plan_lines.len() as u16;
+        let n_charts = charted.iter().filter(|&&c| c).count() as u16;
+        let chart_h = inner.height.saturating_sub(text_rows).checked_div(n_charts).map_or(0, |h| h.clamp(1, MAX_LIST_CHART_ROWS));
+        let clip = |y: u16, h: u16| Rect { y, height: h.min(inner.bottom().saturating_sub(y)), ..inner };
+        let mut y = inner.y;
+        for ((r, lines), chart) in day_rides.iter().zip(texts).zip(charted) {
+            let h = lines.len() as u16;
+            f.render_widget(Paragraph::new(lines), clip(y, h));
+            y += h;
+            if chart && y < inner.bottom() {
+                let ftp = r.meta.as_ref().map(|m| m.ftp).or(cfg.ftp);
+                if let Some((_, power, target)) = self.summary(r) {
+                    let a = clip(y, chart_h);
+                    power_chart(f.buffer_mut(), Rect { x: a.x + 2, width, ..a }, power, target, ftp);
+                }
+                y += chart_h;
+            }
+            y += 1;
+            if y >= inner.bottom() {
+                return;
+            }
+        }
+        f.render_widget(Paragraph::new(plan_lines).wrap(Wrap { trim: false }), clip(y, inner.bottom() - y));
     }
 }
 
 /// Joins `parts` into lines of at most `width` chars, breaking only between parts.
-fn join_wrapped(parts: &[String], sep: &str, width: usize) -> Vec<String> {
+pub fn join_wrapped(parts: &[String], sep: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = vec![];
     for part in parts {
         match lines.last_mut() {

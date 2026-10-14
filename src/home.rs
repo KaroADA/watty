@@ -128,7 +128,7 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
             h.settings_key(terminal, keys, code).await;
             continue;
         }
-        if h.tab == Tab::Activities && h.calendar.picking() {
+        if h.tab == Tab::Activities && h.calendar.captures_keys() {
             h.calendar_key(terminal, keys, code).await;
             continue;
         }
@@ -211,10 +211,10 @@ impl Home {
     }
 
     async fn calendar_key(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, code: KeyCode) {
-        let dir = self.cfg.workouts_dir();
-        match self.calendar.key(code, &self.workouts, &self.rides, &dir) {
+        match self.calendar.key(code, &self.workouts, &self.rides, &self.cfg) {
             calendar::Action::None => {}
             calendar::Action::Error(title, text) => self.error(&title, text),
+            calendar::Action::Deleted => self.reload_rides(),
             calendar::Action::Resume(ride) => self.resume_ride(terminal, keys, ride).await,
             calendar::Action::Ride(path) => {
                 let loaded = match self.workouts.iter().find(|e| e.path == path) {
@@ -327,12 +327,8 @@ fn draw(f: &mut Frame, h: &mut Home) {
             keys.splice(0..0, [("↑/↓", "select"), ("Enter", "ride"), ("s", "test ride (simulator)"), ("r", "reload")]);
         }
         Tab::Activities => {
-            let dir = h.cfg.workouts_dir();
-            h.calendar.draw(f, body, &h.rides, &h.workouts, &dir);
-            keys.splice(
-                0..0,
-                [("←→↑↓", "day"), ("[ ]", "month"), ("t", "today"), ("a", "plan"), ("d", "unplan"), ("Enter", "ride planned"), ("r", "resume")],
-            );
+            h.calendar.draw(f, body, &h.rides, &h.workouts, &h.cfg);
+            keys = if h.calendar.captures_keys() { h.calendar.hints() } else { [h.calendar.hints(), keys].concat() };
         }
         Tab::Settings => {
             h.settings.draw(f, body, &h.cfg);

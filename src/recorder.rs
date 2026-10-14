@@ -41,6 +41,21 @@ pub fn load_meta(csv: &Path) -> Option<RideMeta> {
     serde_json::from_str(&text).ok()
 }
 
+/// Removes a ride's journal, TCX and ride info.
+pub fn delete_ride(csv: &Path) -> Result<()> {
+    std::fs::remove_file(csv).with_context(|| format!("cannot remove {}", csv.display()))?;
+    let tcx = csv.with_extension("tcx");
+    for path in [tcx.with_extension("tcx.tmp"), tcx, meta_path(csv).with_extension("json.tmp"), meta_path(csv)] {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("cannot remove {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn save_meta(csv: &Path, meta: &RideMeta) -> Result<()> {
     write_atomic(&meta_path(csv), &serde_json::to_string_pretty(meta)?)
 }
@@ -139,18 +154,9 @@ impl Recorder {
 
     /// Deletes everything recorded so far.
     pub fn discard(self) -> Result<()> {
-        let Self { csv, csv_path, tcx_path, .. } = self;
+        let Self { csv, csv_path, .. } = self;
         drop(csv);
-        std::fs::remove_file(&csv_path).with_context(|| format!("cannot remove {}", csv_path.display()))?;
-        for path in [tcx_path.clone(), tcx_path.with_extension("tcx.tmp"), meta_path(&csv_path), meta_path(&csv_path).with_extension("json.tmp")] {
-            match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(e).with_context(|| format!("cannot remove {}", path.display()));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+        delete_ride(&csv_path)
     }
 
     pub fn finish(mut self) -> Result<usize> {

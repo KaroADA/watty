@@ -17,7 +17,7 @@ cargo build --release
 - Workouts: the home screen lists `.zwo` files from `~/.local/share/watty/workouts` (or `workouts_dir`); a new folder gets the example workouts. `Enter` rides the selected one, `s` does a test ride on the simulator, and after the ride you're back on the list.
 - Cadence targets come from `Cadence` / `CadenceResting` in `.zwo`; acceptable range is target ± `cadence_tolerance` rpm (default 5).
 - Settings tab: every config field with a short explanation; `Enter` edits a value (empty = default/off) or toggles on/off, and changes are saved to `config.toml` right away. Trainer / HR sensor open the device picker. Starting a ride without FTP or weight jumps here.
-- Activities tab: a month calendar of rides (●) and planned workouts (○) with each ride's time, distance, average power, NP, HR and kJ. `a` plans a workout on the selected day, `d` removes it, `Enter` rides it, `r` resumes an interrupted ride; `[`/`]` change month, `t` jumps to today. Today's planned workouts are marked on the Workouts tab.
+- Activities tab: a month calendar of rides (●) and planned workouts (○) with each ride's time, distance, average power, NP, HR and kJ. each ride in the day panel also gets a power chart over the workout target. `Enter` opens the day's rides: pick one with `↑`/`↓` to see its stats incl. IF/TSS and charts of power, heart rate, cadence and speed (charts that don't fit are left out), or delete it with `x` (asks first); `a` plans a workout on the selected day, `d` removes it, `p` rides it, `r` resumes an interrupted ride; `[`/`]` change month, `t` jumps to today. Today's planned workouts are marked on the Workouts tab.
 - Plan: `~/.local/share/watty/plan.toml`, also editable by hand:
   ```toml
   [[workout]]

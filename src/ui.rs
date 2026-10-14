@@ -342,7 +342,7 @@ fn draw_hr(f: &mut Frame, area: Rect, v: &View) {
 }
 
 /// Same palette as the power zones.
-fn hr_zone_color(zone: u8) -> Color {
+pub fn hr_zone_color(zone: u8) -> Color {
     match zone {
         1 => Color::Gray,
         2 => Color::Blue,
