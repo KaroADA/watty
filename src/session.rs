@@ -157,6 +157,8 @@ pub struct Sample {
     pub cadence: Option<u16>,
     pub speed_kmh: Option<f64>,
     pub distance_m: f64,
+    /// Workout position the sample belongs to.
+    pub pos: u32,
 }
 
 pub struct Session {
@@ -351,6 +353,7 @@ impl Session {
         self.update_hr_check(s.hr());
         let target = self.target_watts();
         let power = s.instant_power();
+        let pos = self.pos;
         if let Some(slot) = self.trace.get_mut(self.pos as usize) {
             *slot = power;
         }
@@ -372,7 +375,26 @@ impl Session {
             cadence: s.cadence(),
             speed_kmh: Some(self.speed_kmh()),
             distance_m: self.distance_m,
+            pos,
         })
+    }
+
+    /// Picks up a ride from its recorded samples, paused. `clock` is the time since the ride started.
+    pub fn restore(&mut self, samples: &[Sample], intensity: f64, clock: u32) {
+        for s in samples {
+            if let Some(slot) = self.trace.get_mut(s.pos as usize) {
+                *slot = s.power;
+            }
+        }
+        let total = self.workout.total_duration();
+        if let Some(last) = samples.last() {
+            self.pos = (last.pos + 1).min(total);
+            self.distance_m = last.distance_m;
+            self.clock = clock.max(last.clock);
+        }
+        self.elapsed = samples.len() as u32;
+        self.intensity = intensity;
+        self.state = if self.pos >= total { RunState::Finished } else { RunState::Paused { auto: false } };
     }
 }
 
@@ -575,6 +597,21 @@ mod tests {
             s.tick(&with_hr(130, 185));
         }
         assert_eq!(s.hr_suggestion, None);
+    }
+
+    #[test]
+    fn restore_continues_where_it_stopped() {
+        let mut s = session();
+        s.toggle_pause();
+        s.adjust_intensity(0.05);
+        let pedal = riding(Some(150), Some(90.0));
+        let samples: Vec<Sample> = (0..30).filter_map(|_| s.tick(&pedal)).collect();
+        let mut r = session();
+        r.restore(&samples, 1.05, 100);
+        assert_eq!((r.pos, r.elapsed, r.clock, r.intensity), (s.pos, s.elapsed, 100, 1.05));
+        assert_eq!(r.distance_m, s.distance_m);
+        assert_eq!(r.trace, s.trace);
+        assert_eq!(r.state, RunState::Paused { auto: false });
     }
 
     #[test]

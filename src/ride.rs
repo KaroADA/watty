@@ -14,7 +14,7 @@ use tracing::{error, info};
 use crate::awake::KeepAwake;
 use crate::ble::Ble;
 use crate::config::{self, Config};
-use crate::recorder::Recorder;
+use crate::recorder::{RideMeta, Recorder};
 use crate::session::{RunState, Sensors, Session};
 use crate::ui::{self, ChartZoom, Picker, View};
 use crate::workout::{Workout, fmt_duration};
@@ -54,6 +54,9 @@ pub fn key_press(ev: &Event) -> Option<(KeyCode, KeyModifiers)> {
 
 pub struct RideSetup {
     pub workout: Workout,
+    pub workout_path: Option<PathBuf>,
+    /// Journal of an interrupted ride to continue.
+    pub resume: Option<PathBuf>,
     pub ftp: u32,
     pub weight: f64,
     /// Show the device picker even if devices are configured.
@@ -80,7 +83,8 @@ pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: b
 
     let mut terminal = ratatui::init();
     let mut keys = spawn_keys();
-    let setup = RideSetup { workout, ftp, weight, select, dev };
+    let workout_path = Some(std::path::absolute(&file)?);
+    let setup = RideSetup { workout, workout_path, resume: None, ftp, weight, select, dev };
     let result = ride(&mut terminal, &mut keys, &mut cfg, setup).await;
     ratatui::restore();
     let summary = result?;
@@ -95,7 +99,7 @@ pub async fn ride(
     cfg: &mut Config,
     setup: RideSetup,
 ) -> Result<String> {
-    let RideSetup { workout, ftp, weight, select, dev } = setup;
+    let RideSetup { workout, workout_path, resume, ftp, weight, select, dev } = setup;
     let _awake = cfg.keep_awake.then(KeepAwake::start);
     let mut trainer = dev.trainer.clone().or(cfg.trainer.clone());
     let mut hr = if dev.no_hr { None } else { dev.hr.clone().or(cfg.hr.clone()) };
@@ -118,6 +122,12 @@ pub async fn ride(
     session.hr_zones = hr_zones;
     let mut sensors = Sensors::default();
     let mut recorder: Option<Recorder> = None;
+    if let Some(csv) = &resume {
+        let (r, samples) = Recorder::resume(csv)?;
+        let clock = (chrono::Utc::now() - r.start()).num_seconds().max(0) as u32;
+        session.restore(&samples, r.meta.intensity, clock);
+        recorder = Some(r);
+    }
     let mut message: Option<(Instant, String)> = None;
     let mut confirm_quit = false;
     let mut discard = false;
@@ -191,13 +201,25 @@ pub async fn ride(
             _ = tick.tick() => {
                 if let Some(sample) = session.tick(&sensors) {
                     if recorder.is_none() {
-                        match Recorder::create(&rides_dir, &session.workout.name) {
+                        let meta = RideMeta {
+                            workout: session.workout.name.clone(),
+                            workout_path: workout_path.clone(),
+                            ftp,
+                            intensity: session.intensity,
+                            finished: false,
+                            closed: false,
+                        };
+                        match Recorder::create(&rides_dir, meta) {
                             Ok(r) => recorder = Some(r),
                             Err(e) => {
                                 error!("recorder: {e:#}");
                                 message = Some((Instant::now(), format!("CANNOT RECORD: {e:#}")));
                             }
                         }
+                    }
+                    if let Some(r) = recorder.as_mut() {
+                        r.meta.intensity = session.intensity;
+                        r.meta.finished = session.state == RunState::Finished;
                     }
                     if let Some(r) = recorder.as_mut()
                         && let Err(e) = r.record(sample)
@@ -235,7 +257,9 @@ pub async fn ride(
             Ok(()) => out += "\nride discarded",
             Err(e) => out += &format!("\ncannot discard: {e:#}"),
         }
-    } else if let Some(r) = recorder {
+    } else if let Some(mut r) = recorder {
+        r.meta.intensity = session.intensity;
+        r.meta.finished |= session.state == RunState::Finished;
         let (csv, tcx) = (r.csv_path().to_path_buf(), r.tcx_path().to_path_buf());
         match r.finish() {
             Ok(n) => out += &format!("\n{n} samples\nTCX: {}\nCSV: {}", tcx.display(), csv.display()),

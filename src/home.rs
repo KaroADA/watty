@@ -11,12 +11,14 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::DeviceArgs;
-use crate::config::Config;
+use crate::config::{self, Config};
+use crate::history::{self, RideFile};
 use crate::library::{self, Entry};
+use crate::recorder::{read_journal, save_meta};
 use crate::ride::{self, RideSetup, key_press, spawn_keys};
 use crate::session::Session;
 use crate::ui::{Chart, HINT, LABEL, centered, key_hints};
-use crate::workout::fmt_duration;
+use crate::workout::{Workout, fmt_duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -37,6 +39,9 @@ struct Home {
     workouts: Vec<Entry>,
     list: ListState,
     popup: Option<Popup>,
+    rides: Vec<RideFile>,
+    /// Interrupted ride offered for resuming, with seconds ridden.
+    resume: Option<(RideFile, u32)>,
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
@@ -48,8 +53,21 @@ pub async fn run(cfg: Config) -> Result<()> {
 }
 
 async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, cfg: Config) -> Result<()> {
-    let mut h = Home { cfg, tab: Tab::Workouts, workouts: vec![], list: ListState::default().with_selected(Some(0)), popup: None };
+    let mut h = Home {
+        cfg,
+        tab: Tab::Workouts,
+        workouts: vec![],
+        list: ListState::default().with_selected(Some(0)),
+        popup: None,
+        rides: vec![],
+        resume: None,
+    };
     h.reload_workouts();
+    h.reload_rides();
+    h.resume = history::resume_offer(&h.rides).map(|r| {
+        let ridden = read_journal(&r.csv).map_or(0, |(_, s)| s.len() as u32);
+        (r.clone(), ridden)
+    });
     let mut term = signal(SignalKind::terminate())?;
     let mut hangup = signal(SignalKind::hangup())?;
 
@@ -63,6 +81,25 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
         let Some((code, mods)) = key_press(&ev) else { continue };
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
             return Ok(());
+        }
+        if let Some((ride, _)) = &h.resume {
+            match code {
+                KeyCode::Char('r') | KeyCode::Enter => {
+                    let ride = ride.clone();
+                    h.resume = None;
+                    h.resume_ride(terminal, keys, ride).await;
+                }
+                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(meta) = &ride.meta
+                        && let Err(e) = save_meta(&ride.csv, &history::closed(meta))
+                    {
+                        h.error("Cannot update ride", format!("{e:#}"));
+                    }
+                    h.resume = None;
+                }
+                _ => {}
+            }
+            continue;
         }
         if h.popup.is_some() {
             if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(' ')) {
@@ -108,6 +145,10 @@ impl Home {
         self.list.select((n > 0).then(|| self.list.selected().unwrap_or(0).min(n - 1)));
     }
 
+    fn reload_rides(&mut self) {
+        self.rides = history::list(&config::rides_dir());
+    }
+
     fn error(&mut self, title: &str, text: String) {
         self.popup = Some(Popup { title: title.into(), lines: text.lines().map(String::from).collect(), error: true });
     }
@@ -125,8 +166,35 @@ impl Home {
         let (Some(ftp), Some(weight)) = (self.cfg.ftp, self.cfg.weight) else {
             return self.error("FTP and weight needed", "Set `ftp` and `weight` in ~/.config/watty/config.toml.".into());
         };
-        let setup = RideSetup { workout, ftp, weight, select: false, dev: DeviceArgs::configured(sim) };
+        let workout_path = Some(entry.path.clone());
+        let setup = RideSetup { workout, workout_path, resume: None, ftp, weight, select: false, dev: DeviceArgs::configured(sim) };
+        self.ride(terminal, keys, setup).await;
+    }
+
+    async fn resume_ride(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, ride: RideFile) {
+        let Some((meta, path)) = ride.meta.as_ref().and_then(|m| Some((m, m.workout_path.clone()?))) else { return };
+        let workout = match Workout::load(&path) {
+            Ok(w) => w,
+            Err(e) => return self.error("Cannot resume", format!("{e:#}")),
+        };
+        let Some(weight) = self.cfg.weight else {
+            return self.error("Weight needed", "Set `weight` in ~/.config/watty/config.toml.".into());
+        };
+        let setup = RideSetup {
+            workout,
+            workout_path: Some(path),
+            resume: Some(ride.csv.clone()),
+            ftp: meta.ftp,
+            weight,
+            select: false,
+            dev: DeviceArgs::configured(false),
+        };
+        self.ride(terminal, keys, setup).await;
+    }
+
+    async fn ride(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, setup: RideSetup) {
         let result = ride::ride(terminal, keys, &mut self.cfg, setup).await;
+        self.reload_rides();
         let _ = terminal.clear();
         match result {
             Ok(summary) => {
@@ -168,6 +236,9 @@ fn draw(f: &mut Frame, h: &mut Home) {
 
     if let Some(p) = &h.popup {
         draw_popup(f, p);
+    }
+    if let Some((ride, ridden)) = &h.resume {
+        draw_resume(f, ride, *ridden);
     }
 }
 
@@ -222,6 +293,22 @@ fn draw_workouts(f: &mut Frame, area: Rect, h: &mut Home) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(panel(&entry.title())), info);
     let session = Session::new(w.clone(), h.cfg.ftp.unwrap_or(200), h.cfg.weight.unwrap_or(75.0), false);
     f.render_widget(Chart { session: &session, zoom: 0.0 }, chart);
+}
+
+fn draw_resume(f: &mut Frame, ride: &RideFile, ridden: u32) {
+    let area = centered(f.area(), 60, 6);
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(Color::Yellow))
+        .title(Span::styled(" Interrupted ride ", Style::new().fg(Color::Yellow).bold()));
+    let lines = vec![
+        Line::raw(""),
+        Line::styled(format!(" {}", ride.name()), LABEL),
+        Line::styled(format!(" started {}, {} ridden", ride.started.format("%H:%M"), fmt_duration(ridden)), HINT),
+        Line::from(vec![Span::styled(" [r] ", LABEL), Span::raw("resume   "), Span::styled("[n] ", LABEL), Span::raw("no")]),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_popup(f: &mut Frame, p: &Popup) {

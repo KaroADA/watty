@@ -2,6 +2,7 @@ mod awake;
 mod ble;
 mod config;
 mod devices;
+mod history;
 mod home;
 mod library;
 mod protocol;
