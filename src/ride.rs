@@ -20,7 +20,7 @@ use crate::ui::{self, ChartZoom, Picker, View};
 use crate::workout::{Workout, fmt_duration};
 use crate::{DeviceArgs, Devices, start_devices};
 
-fn spawn_keys() -> mpsc::UnboundedReceiver<Event> {
+pub fn spawn_keys() -> mpsc::UnboundedReceiver<Event> {
     let (tx, rx) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
         loop {
@@ -45,11 +45,20 @@ fn spawn_keys() -> mpsc::UnboundedReceiver<Event> {
     rx
 }
 
-fn key_press(ev: &Event) -> Option<(KeyCode, KeyModifiers)> {
+pub fn key_press(ev: &Event) -> Option<(KeyCode, KeyModifiers)> {
     match ev {
         Event::Key(k) if k.kind == KeyEventKind::Press => Some((k.code, k.modifiers)),
         _ => None,
     }
+}
+
+pub struct RideSetup {
+    pub workout: Workout,
+    pub ftp: u32,
+    pub weight: f64,
+    /// Show the device picker even if devices are configured.
+    pub select: bool,
+    pub dev: DeviceArgs,
 }
 
 pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: bool, dev: DeviceArgs) -> Result<()> {
@@ -69,26 +78,25 @@ pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: b
         crate::resolve_devices(&mut cfg, &dev).await?;
     }
 
-    let _awake = cfg.keep_awake.then(KeepAwake::start);
     let mut terminal = ratatui::init();
     let mut keys = spawn_keys();
-    let result = ride(&mut terminal, &mut keys, &mut cfg, workout, ftp, weight, select, dev).await;
+    let setup = RideSetup { workout, ftp, weight, select, dev };
+    let result = ride(&mut terminal, &mut keys, &mut cfg, setup).await;
     ratatui::restore();
     let summary = result?;
     println!("{summary}");
     Ok(())
 }
 
-async fn ride(
+/// Runs a ride on an already initialized terminal and returns its summary.
+pub async fn ride(
     terminal: &mut DefaultTerminal,
     keys: &mut mpsc::UnboundedReceiver<Event>,
     cfg: &mut Config,
-    workout: Workout,
-    ftp: u32,
-    weight: f64,
-    select: bool,
-    dev: DeviceArgs,
+    setup: RideSetup,
 ) -> Result<String> {
+    let RideSetup { workout, ftp, weight, select, dev } = setup;
+    let _awake = cfg.keep_awake.then(KeepAwake::start);
     let mut trainer = dev.trainer.clone().or(cfg.trainer.clone());
     let mut hr = if dev.no_hr { None } else { dev.hr.clone().or(cfg.hr.clone()) };
 
@@ -176,7 +184,7 @@ async fn ride(
             _ = tick.tick() => {
                 if let Some(sample) = session.tick(&sensors) {
                     if recorder.is_none() {
-                        match Recorder::create(&config::data_dir().join("rides"), &session.workout.name) {
+                        match Recorder::create(&config::rides_dir(), &session.workout.name) {
                             Ok(r) => recorder = Some(r),
                             Err(e) => {
                                 error!("recorder: {e:#}");

@@ -2,6 +2,8 @@ mod awake;
 mod ble;
 mod config;
 mod devices;
+mod home;
+mod library;
 mod protocol;
 mod recorder;
 mod ride;
@@ -33,8 +35,9 @@ struct Cli {
     /// Debug logging, incl. raw BLE bytes
     #[arg(short, long, global = true)]
     verbose: bool,
+    /// Without a command, opens the home screen
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(clap::Args, Clone)]
@@ -57,6 +60,13 @@ struct DeviceArgs {
     /// Simulate periodic BLE dropouts
     #[arg(long)]
     sim_dropouts: bool,
+}
+
+impl DeviceArgs {
+    /// Configured devices, or the simulator for a test ride.
+    fn configured(sim: bool) -> Self {
+        Self { trainer: None, hr: None, no_hr: false, sim, speed: 1.0, sim_dropouts: false }
+    }
 }
 
 #[derive(Subcommand)]
@@ -130,11 +140,14 @@ fn init_logging(verbose: bool, file: Option<&std::path::Path>) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let log_file = config::data_dir().join("watty.log");
-    let tui = matches!(cli.cmd, Cmd::Ride { .. });
+    let tui = matches!(cli.cmd, None | Some(Cmd::Ride { .. }));
     init_logging(cli.verbose, tui.then_some(log_file.as_path()))?;
     let mut cfg = Config::load()?;
 
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        return home::run(cfg).await;
+    };
+    match cmd {
         Cmd::Parse { file, ftp } => parse_cmd(&file, ftp.or(cfg.ftp)),
         Cmd::Scan { secs } => scan_cmd(secs).await,
         Cmd::Monitor { dev } => monitor_cmd(&mut cfg, dev, None).await,

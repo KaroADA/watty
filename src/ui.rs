@@ -136,8 +136,8 @@ impl Widget for BigValue<'_> {
 // ---------------------------------------------------------------- colors
 
 /// Small text that must stay readable from a few meters away.
-const LABEL: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
-const HINT: Style = Style::new().fg(Color::Gray);
+pub const LABEL: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
+pub const HINT: Style = Style::new().fg(Color::Gray);
 
 pub fn zone_color(frac: f64) -> Color {
     match power_zone(frac) {
@@ -352,7 +352,7 @@ fn hr_zone_color(zone: u8) -> Color {
     }
 }
 
-fn key_hints(keys: &[(&str, &str)]) -> Line<'static> {
+pub fn key_hints(keys: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (key, desc) in keys {
         spans.push(Span::styled(key.to_string(), LABEL));
@@ -388,17 +388,17 @@ fn draw_cadence(f: &mut Frame, area: Rect, v: &View) {
     f.render_widget(BigValue { title: &title, value, unit: "rpm", color, note, icon: Some(Icon::Cadence) }, area);
 }
 
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
+pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
 /// Zone-colored target profile; the ridden part shows actual power instead.
-struct Chart<'a> {
-    session: &'a Session,
+pub struct Chart<'a> {
+    pub session: &'a Session,
     /// 0 = whole workout, 1 = following the cursor.
-    zoom: f64,
+    pub zoom: f64,
 }
 
 const ZOOM_TIME: Duration = Duration::from_millis(600);

@@ -32,6 +32,8 @@ pub struct Config {
     /// Lower ERG while paused and ramp it back up after resuming.
     #[serde(default = "default_true")]
     pub soft_start: bool,
+    /// Where `.zwo` files are listed from; defaults to `~/.local/share/watty/workouts`.
+    pub workouts_dir: Option<PathBuf>,
 }
 
 fn default_segment_warning() -> u32 {
@@ -60,6 +62,7 @@ impl Default for Config {
             segment_warning: default_segment_warning(),
             keep_awake: true,
             soft_start: true,
+            workouts_dir: None,
         }
     }
 }
@@ -81,7 +84,15 @@ pub fn data_dir() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share")
 }
 
+pub fn rides_dir() -> PathBuf {
+    data_dir().join("rides")
+}
+
 impl Config {
+    pub fn workouts_dir(&self) -> PathBuf {
+        self.workouts_dir.clone().unwrap_or_else(|| data_dir().join("workouts"))
+    }
+
     pub fn hr_zones(&self) -> Result<Option<HrZones>> {
         if let Some(z) = &self.hr_zones {
             let Ok(bounds) = <[u16; 4]>::try_from(z.as_slice()) else {

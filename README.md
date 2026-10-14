@@ -4,6 +4,7 @@ TUI for FTMS smart trainers with `.zwo` workouts, ERG control, BLE heart rate an
 
 ```sh
 cargo build --release
+./target/release/watty                                     # home screen: pick a workout and ride
 ./target/release/watty scan                                # find devices
 ./target/release/watty monitor --trainer <ADDR> --hr <ADDR> # read-only data
 ./target/release/watty erg --trainer <ADDR> --watts 100     # manual ERG test
@@ -12,7 +13,8 @@ cargo build --release
 ./target/release/watty export ~/.local/share/watty/rides/<ride>.csv
 ```
 
-- Config: `~/.config/watty/config.toml` (`ftp`, `weight`, `trainer`, `hr`, `cadence_tolerance`, `auto_pause`, `max_hr`, `hr_zones`, `segment_warning`, `keep_awake`, `soft_start`), written by `ride`.
+- Config: `~/.config/watty/config.toml` (`ftp`, `weight`, `trainer`, `hr`, `cadence_tolerance`, `auto_pause`, `max_hr`, `hr_zones`, `segment_warning`, `keep_awake`, `soft_start`, `workouts_dir`), written by `ride`.
+- Workouts: the home screen lists `.zwo` files from `~/.local/share/watty/workouts` (or `workouts_dir`); a new folder gets the example workouts. `Enter` rides the selected one, `s` does a test ride on the simulator, and after the ride you're back on the list.
 - Cadence targets come from `Cadence` / `CadenceResting` in `.zwo`; acceptable range is target ± `cadence_tolerance` rpm (default 5).
 - Rides: `~/.local/share/watty/rides/` (CSV journal + TCX). Log: `~/.local/share/watty/watty.log`.
 - Heart-rate zones: set `max_hr` (zones at 60/70/80/90%) or `hr_zones = [z1, z2, z3, z4]` with each zone's upper bound in bpm; the HR panel is then colored by zone.
