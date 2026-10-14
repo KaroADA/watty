@@ -1,34 +1,79 @@
 # watty
 
-TUI for FTMS smart trainers with `.zwo` workouts, ERG control, BLE heart rate and TCX recording.
+Indoor cycling in the terminal. watty controls an FTMS smart trainer in ERG mode, plays `.zwo` workouts, reads a BLE heart-rate strap and records every ride.
+
+![Riding a workout](docs/screenshots/ride.png)
+
+## Features
+
+- **ERG workouts** from `.zwo` files: steady, ramps, intervals and cadence targets, with a soft start and a countdown before each segment change.
+- **Live ride screen**: power, target, heart rate (colored by zone), cadence, time left and the workout profile with your actual power drawn over it.
+- **Auto-pause** when you stop pedaling, `+`/`-` to adjust intensity, and a hint to back off when heart rate drifts too high on an endurance segment.
+- **Recording** to CSV and TCX. An interrupted ride (crash, quit) can be resumed where it stopped.
+- **Calendar** of past rides and planned workouts, with per-ride stats (NP, IF, TSS) and charts.
+- **Simulator** to try everything without a trainer.
+
+![Workout list](docs/screenshots/workouts.png)
+
+![Activities calendar](docs/screenshots/activities.png)
+
+![Ride details](docs/screenshots/ride-details.png)
+
+![Settings](docs/screenshots/settings.png)
+
+## Install
+
+Needs Linux with BlueZ and a Rust toolchain.
 
 ```sh
 cargo build --release
-./target/release/watty                                     # home screen: pick a workout and ride
-./target/release/watty scan                                # find devices
-./target/release/watty monitor --trainer <ADDR> --hr <ADDR> # read-only data
-./target/release/watty erg --trainer <ADDR> --watts 100     # manual ERG test
-./target/release/watty ride workouts/sweet_spot_3x10.zwo --ftp 250
-./target/release/watty ride workouts/test_short.zwo --sim --speed 10
-./target/release/watty export ~/.local/share/watty/rides/<ride>.csv
+./target/release/watty
 ```
 
-- Config: `~/.config/watty/config.toml` (`ftp`, `weight`, `trainer`, `hr`, `cadence_tolerance`, `auto_pause`, `max_hr`, `hr_zones`, `segment_warning`, `keep_awake`, `soft_start`, `workouts_dir`), written by `ride`.
-- Workouts: the home screen lists `.zwo` files from `~/.local/share/watty/workouts` (or `workouts_dir`); a new folder gets the example workouts. `Enter` rides the selected one, `s` does a test ride on the simulator, and after the ride you're back on the list.
-- Cadence targets come from `Cadence` / `CadenceResting` in `.zwo`; acceptable range is target ± `cadence_tolerance` rpm (default 5).
-- Settings tab: every config field with a short explanation; `Enter` edits a value (empty = default/off) or toggles on/off, and changes are saved to `config.toml` right away. Trainer / HR sensor open the device picker. Starting a ride without FTP or weight jumps here.
-- Activities tab: a month calendar of rides (●) and planned workouts (○) with each ride's time, distance, average power, NP, HR and kJ. each ride in the day panel also gets a power chart over the workout target. `Enter` opens the day's rides: pick one with `↑`/`↓` to see its stats incl. IF/TSS and charts of power, heart rate, cadence and speed (charts that don't fit are left out), or delete it with `x` (asks first); `a` plans a workout on the selected day, `d` removes it, `p` rides it, `r` resumes an interrupted ride; `[`/`]` change month, `t` jumps to today. Today's planned workouts are marked on the Workouts tab.
-- Plan: `~/.local/share/watty/plan.toml`, also editable by hand:
-  ```toml
-  [[workout]]
-  date = 2026-10-16
-  file = "sweet_spot_3x10.zwo"   # relative to the workouts folder, or absolute
-  ```
-- Rides: `~/.local/share/watty/rides/` (CSV journal + TCX); simulator rides go to `rides/test/`. Quitting asks whether to save or discard the ride. Each ride has a `.json` next to its CSV with the workout and progress: if the latest ride was interrupted (crash or quit before the end) less than 3 h ago, the home screen offers to resume it, paused where it stopped. Log: `~/.local/share/watty/watty.log`.
-- Heart-rate zones: set `max_hr` (zones at 60/70/80/90%) or `hr_zones = [z1, z2, z3, z4]` with each zone's upper bound in bpm; the HR panel is then colored by zone.
-- The last `segment_warning` seconds of a segment (default 10, `0` = off) show a popup with a countdown and the next segment's targets.
-- `keep_awake` (default on) stops the screen from dimming or locking during a ride: via `org.freedesktop.ScreenSaver` (GNOME, KDE, Xfce), `systemd-inhibit` (e.g. hypridle), and on Omarchy by tagging the terminal window `noidle`.
-- `soft_start` (default on): while paused ERG drops to 50% of the target, and after starting or resuming it climbs back to 100% over 5 s.
-- Auto-pause (`auto_pause`, default on): pauses after 3 s without pedaling (power under 15 W and no cadence, so a cadence sensor is optional) and resumes after 2 s of pedaling. A manual pause only resumes with `space`.
-- With HR zones set, if heart rate stays above the zone matching an endurance or tempo segment (power zone 2–3) for 60 s, after the first 2 min of the segment, the status line suggests lowering intensity: `a` lowers it 5%, `x` dismisses; it won't ask again for 2 min.
-- Ride keys: `space` start/pause, `+`/`-` intensity ±5%, `n` next segment, `q` quit (confirm); with `--sim`, `s` stops/starts simulated pedaling.
+Start a ride with `Enter` on the Workouts tab, or `s` for a test ride on the simulator. Missing FTP or weight takes you to Settings first; the trainer and HR sensor are picked from a device scan.
+
+## Keys
+
+| Ride | |
+|---|---|
+| `space` | start / pause |
+| `+` `-` | intensity ±5% |
+| `n` | next segment |
+| `q` | quit (save or discard) |
+
+| Activities | |
+|---|---|
+| `Enter` | ride details |
+| `a` / `d` | plan / unplan a workout |
+| `p` | ride the planned workout |
+| `r` | resume an interrupted ride |
+| `[` `]` / `t` | change month / today |
+
+## Command line
+
+```sh
+watty scan                                   # find BLE devices
+watty ride workouts/sweet_spot_3x10.zwo      # ride without the home screen
+watty ride workouts/test_short.zwo --sim --speed 10
+watty monitor --trainer <ADDR> --hr <ADDR>   # read-only data
+watty erg --trainer <ADDR> --watts 100       # fixed ERG target
+watty export ~/.local/share/watty/rides/<ride>.csv
+```
+
+## Files
+
+| | |
+|---|---|
+| `~/.config/watty/config.toml` | settings (also editable in the Settings tab) |
+| `~/.local/share/watty/workouts/` | `.zwo` workouts, seeded with examples |
+| `~/.local/share/watty/rides/` | recorded rides (CSV + TCX); simulator rides in `test/` |
+| `~/.local/share/watty/plan.toml` | planned workouts |
+| `~/.local/share/watty/watty.log` | log |
+
+The plan can be edited by hand:
+
+```toml
+[[workout]]
+date = 2026-10-16
+file = "sweet_spot_3x10.zwo"   # relative to the workouts folder, or absolute
+```
