@@ -279,7 +279,7 @@ async fn shutdown(devices: &mut Devices) {
     }
 }
 
-async fn pick_devices(
+pub async fn pick_devices(
     terminal: &mut DefaultTerminal,
     keys: &mut mpsc::UnboundedReceiver<Event>,
     ble: &Ble,

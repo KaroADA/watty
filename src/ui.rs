@@ -352,6 +352,14 @@ fn hr_zone_color(zone: u8) -> Color {
     }
 }
 
+/// Shortens paths under the home directory to `~/…`.
+pub fn tilde(text: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => text.replace(&format!("{home}/"), "~/"),
+        _ => text.to_string(),
+    }
+}
+
 pub fn panel(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)

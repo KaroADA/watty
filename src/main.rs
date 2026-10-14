@@ -11,6 +11,7 @@ mod protocol;
 mod recorder;
 mod ride;
 mod session;
+mod settings;
 mod sim;
 mod ui;
 mod workout;

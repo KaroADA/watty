@@ -13,23 +13,26 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::DeviceArgs;
-use crate::calendar::{Action, Calendar};
+use crate::ble::Ble;
+use crate::calendar::{self, Calendar};
+use crate::settings::{self, Settings};
 use crate::config::{self, Config};
 use crate::history::{self, RideFile};
 use crate::library::{self, Entry};
 use crate::recorder::{read_journal, save_meta};
 use crate::ride::{self, RideSetup, key_press, spawn_keys};
 use crate::session::Session;
-use crate::ui::{Chart, HINT, LABEL, centered, key_hints, panel};
+use crate::ui::{Chart, HINT, LABEL, centered, key_hints, panel, tilde};
 use crate::workout::{Workout, fmt_duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Workouts,
     Activities,
+    Settings,
 }
 
-const TABS: [(Tab, &str); 2] = [(Tab::Workouts, "Workouts"), (Tab::Activities, "Activities")];
+const TABS: [(Tab, &str); 3] = [(Tab::Workouts, "Workouts"), (Tab::Activities, "Activities"), (Tab::Settings, "Settings")];
 
 struct Popup {
     title: String,
@@ -47,6 +50,7 @@ struct Home {
     /// Interrupted ride offered for resuming, with seconds ridden.
     resume: Option<(RideFile, u32)>,
     calendar: Calendar,
+    settings: Settings,
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
@@ -67,6 +71,7 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
         rides: vec![],
         resume: None,
         calendar: Calendar::new(),
+        settings: Settings::new(),
     };
     h.reload_workouts();
     h.reload_rides();
@@ -119,6 +124,10 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
             }
             continue;
         }
+        if h.tab == Tab::Settings && (h.settings.editing() || !matches!(code, KeyCode::Char('q') | KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1'..='9'))) {
+            h.settings_key(terminal, keys, code).await;
+            continue;
+        }
         if h.tab == Tab::Activities && h.calendar.picking() {
             h.calendar_key(terminal, keys, code).await;
             continue;
@@ -142,6 +151,7 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
                     _ => {}
                 },
                 Tab::Activities => h.calendar_key(terminal, keys, code).await,
+                Tab::Settings => {}
             },
         }
     }
@@ -167,13 +177,46 @@ impl Home {
         }
     }
 
+    async fn settings_key(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, code: KeyCode) {
+        match self.settings.key(code, &mut self.cfg) {
+            settings::Action::None => {}
+            settings::Action::Saved => self.reload_workouts(),
+            settings::Action::Error(e) => self.error("Invalid value", e),
+            settings::Action::PickDevices => {
+                let picked = match Ble::new().await {
+                    Ok(ble) => ride::pick_devices(terminal, keys, &ble, self.cfg.trainer.clone(), self.cfg.hr.clone()).await,
+                    Err(e) => Err(e),
+                };
+                let _ = terminal.clear();
+                match picked {
+                    Ok(Some((trainer, hr))) => {
+                        self.cfg.trainer = Some(trainer);
+                        self.cfg.hr = hr;
+                        if let Err(e) = self.cfg.save() {
+                            self.error("Cannot save config", format!("{e:#}"));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => self.error("Bluetooth", format!("{e:#}")),
+                }
+            }
+        }
+    }
+
+    /// Sends the rider to Settings to fill in what a ride needs.
+    fn need_settings(&mut self, what: &str) {
+        self.settings.select_weight_or_ftp(&self.cfg);
+        self.switch(Tab::Settings);
+        self.error(&format!("{what} needed"), format!("Set {} here first.", what.to_lowercase()));
+    }
+
     async fn calendar_key(&mut self, terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, code: KeyCode) {
         let dir = self.cfg.workouts_dir();
         match self.calendar.key(code, &self.workouts, &self.rides, &dir) {
-            Action::None => {}
-            Action::Error(title, text) => self.error(&title, text),
-            Action::Resume(ride) => self.resume_ride(terminal, keys, ride).await,
-            Action::Ride(path) => {
+            calendar::Action::None => {}
+            calendar::Action::Error(title, text) => self.error(&title, text),
+            calendar::Action::Resume(ride) => self.resume_ride(terminal, keys, ride).await,
+            calendar::Action::Ride(path) => {
                 let loaded = match self.workouts.iter().find(|e| e.path == path) {
                     Some(e) => e.workout.clone().map_err(|e| anyhow::anyhow!(e)),
                     None => Workout::load(&path),
@@ -225,7 +268,7 @@ impl Home {
         sim: bool,
     ) {
         let (Some(ftp), Some(weight)) = (self.cfg.ftp, self.cfg.weight) else {
-            return self.error("FTP and weight needed", "Set `ftp` and `weight` in ~/.config/watty/config.toml.".into());
+            return self.need_settings("FTP and weight");
         };
         let setup = RideSetup { workout, workout_path: Some(path), resume: None, ftp, weight, select: false, dev: DeviceArgs::configured(sim) };
         self.ride(terminal, keys, setup).await;
@@ -238,7 +281,7 @@ impl Home {
             Err(e) => return self.error("Cannot resume", format!("{e:#}")),
         };
         let Some(weight) = self.cfg.weight else {
-            return self.error("Weight needed", "Set `weight` in ~/.config/watty/config.toml.".into());
+            return self.need_settings("Weight");
         };
         let setup = RideSetup {
             workout,
@@ -266,14 +309,6 @@ impl Home {
     }
 }
 
-/// Shortens paths under the home directory to `~/…`.
-fn tilde(text: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => text.replace(&format!("{home}/"), "~/"),
-        _ => text.to_string(),
-    }
-}
-
 fn draw(f: &mut Frame, h: &mut Home) {
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(5), Constraint::Length(1)]).areas(f.area());
@@ -298,6 +333,14 @@ fn draw(f: &mut Frame, h: &mut Home) {
                 0..0,
                 [("←→↑↓", "day"), ("[ ]", "month"), ("t", "today"), ("a", "plan"), ("d", "unplan"), ("Enter", "ride planned"), ("r", "resume")],
             );
+        }
+        Tab::Settings => {
+            h.settings.draw(f, body, &h.cfg);
+            if h.settings.editing() {
+                keys = vec![("Enter", "save"), ("Esc", "cancel")];
+            } else {
+                keys.splice(0..0, [("↑/↓", "select"), ("Enter", "change")]);
+            }
         }
     }
     f.render_widget(key_hints(&keys), footer);
