@@ -552,21 +552,34 @@ impl Widget for Chart<'_> {
                 let seg = &segs[i];
                 let (a, b) = (watts(seg.power_start?), watts(seg.power_end?));
                 let label = if a == b { a.to_string() } else { format!("{a}–{b}") };
-                Some((x0, x1, label, zone_color(seg.power_start? * s.intensity)))
+                Some((x0, x1, label, short_duration(seg.duration), zone_color(seg.power_start? * s.intensity)))
             })
             .collect();
-        let shown = consistent_labels(power_labels.iter().map(|(x0, x1, l, _)| (*x0, *x1, l.as_str())), clipped);
-        for ((x0, x1, label, color), show) in power_labels.iter().zip(shown) {
+        let shown = consistent_labels(power_labels.iter().map(|(x0, x1, l, _, _)| (*x0, *x1, l.as_str())), clipped);
+        let durations_shown = consistent_labels(power_labels.iter().map(|(x0, x1, _, d, _)| (*x0, *x1, d.as_str())), clipped);
+        for ((x0, x1, label, duration, color), (show, show_duration)) in power_labels.iter().zip(shown.into_iter().zip(durations_shown)) {
             if !show {
                 continue;
             }
             let top = heights[*x0 as usize..*x1 as usize].iter().copied().max().unwrap_or(0);
-            let x = inner.x + x0 + (x1 - x0 - label.chars().count() as u16) / 2;
+            let centered_x = |text: &str| inner.x + x0 + (x1 - x0 - text.chars().count() as u16) / 2;
+            let on_bar = Style::new().fg(Color::Black).bg(*color).bold();
             // Above the bar if there's room under the cursor row, otherwise on its top cell.
-            match (inner.bottom() - top).checked_sub(1).filter(|&y| y > inner.y) {
-                Some(y) => buf.set_string(x, y, label, Style::new().fg(*color).bold()),
-                None => buf.set_string(x, inner.bottom() - top.max(1), label, Style::new().fg(Color::Black).bg(*color).bold()),
+            let y = match (inner.bottom() - top).checked_sub(1).filter(|&y| y > inner.y) {
+                Some(y) => {
+                    buf.set_string(centered_x(label), y, label, Style::new().fg(*color).bold());
+                    y
+                }
+                None => {
+                    let y = inner.bottom() - top.max(1);
+                    buf.set_string(centered_x(label), y, label, on_bar);
+                    y
+                }
             };
+            // Segment length goes on the bar right under the power label.
+            if show_duration && y + 1 < inner.bottom() {
+                buf.set_string(centered_x(duration), y + 1, duration, on_bar);
+            }
         }
 
         let Some(lane) = lane else { return };
@@ -601,6 +614,18 @@ fn consistent_labels<'a>(
     let cramped: Vec<&str> =
         labels.clone().filter(|&(x0, x1, l)| !clipped(x0, x1) && !fits(x0, x1, l)).map(|(_, _, l)| l).collect();
     labels.map(|(x0, x1, l)| !cramped.contains(&l) && fits(x0, x1, l)).collect()
+}
+
+/// Compact segment length for chart labels: "30s", "5m", "2:30", "1h15".
+fn short_duration(secs: u32) -> String {
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    match (h, m, s) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}:{s:02}"),
+        (h, 0, _) => format!("{h}h"),
+        (h, m, _) => format!("{h}h{m:02}"),
+    }
 }
 
 /// Coarsest chart scale before it starts following the cursor, seconds per column.
@@ -665,4 +690,33 @@ pub fn draw_picker(f: &mut Frame, p: &mut Picker) {
         key_hints(&[("↑/↓", "select"), ("t", "trainer"), ("h", "HR"), ("Enter", "start"), ("q", "quit")]),
         help,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workout::Workout;
+
+    fn render_chart(width: u16, height: u16) -> String {
+        let w = Workout::parse(include_str!("../workouts/sweet_spot_3x10.zwo")).unwrap();
+        let s = Session::new(w, 200, 75.0, true);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        Chart { session: &s, zoom: 0.0 }.render(area, &mut buf);
+        (0..height).map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n").collect()
+    }
+
+    #[test]
+    fn segment_durations_shown_when_they_fit() {
+        let wide = render_chart(240, 16);
+        assert_eq!(wide.matches("10m").count(), 4, "{wide}");
+        assert_eq!(wide.matches("5m").count(), 3, "{wide}");
+        let narrow = render_chart(20, 16);
+        assert!(narrow.contains("10m") && !narrow.contains("5m"), "{narrow}");
+    }
+
+    #[test]
+    fn short_durations() {
+        assert_eq!([30, 300, 150, 3600, 4500].map(short_duration), ["30s", "5m", "2:30", "1h", "1h15"]);
+    }
 }
