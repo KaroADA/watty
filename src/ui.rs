@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::ble::Discovered;
 use crate::config::HrZones;
 use crate::devices::{LinkStatus, TrainerTarget};
-use crate::session::{RunState, Sensors, Session};
+use crate::session::{RunState, Sensors, Session, power_zone};
 use crate::workout::fmt_duration;
 
 // ---------------------------------------------------------------- big digits
@@ -140,12 +140,12 @@ const LABEL: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
 const HINT: Style = Style::new().fg(Color::Gray);
 
 pub fn zone_color(frac: f64) -> Color {
-    match frac {
-        f if f < 0.56 => Color::Gray,
-        f if f < 0.76 => Color::Blue,
-        f if f < 0.91 => Color::Green,
-        f if f < 1.06 => Color::Yellow,
-        f if f < 1.21 => Color::Rgb(255, 140, 0),
+    match power_zone(frac) {
+        1 => Color::Gray,
+        2 => Color::Blue,
+        3 => Color::Green,
+        4 => Color::Yellow,
+        5 => Color::Rgb(255, 140, 0),
         _ => Color::Red,
     }
 }
@@ -244,6 +244,10 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         RunState::Paused { auto: false } => Line::styled(" ⏸ PAUSED — SPACE to resume", Style::new().yellow().bold()),
         RunState::Paused { auto: true } => Line::styled(" ⏸ AUTO-PAUSED — start pedaling to resume", Style::new().yellow().bold()),
         RunState::Finished => Line::styled(" ✓ Workout complete — keep riding or press q", Style::new().green().bold()),
+        RunState::Running if s.hr_suggestion.is_some() => {
+            let h = s.hr_suggestion.unwrap();
+            Line::styled(format!(" ♥ HR {} above zone {} — [a] lower intensity 5%   [x] dismiss", h.hr, h.zone), Style::new().fg(Color::LightRed).bold())
+        }
         RunState::Running => match v.message {
             Some((t, m)) if t.elapsed().as_secs() < 15 => Line::styled(format!(" {m}"), Style::new().fg(Color::Yellow)),
             _ => Line::styled(v.recording.map_or(String::new(), |p| format!(" ● REC {p}")), HINT),
@@ -251,6 +255,9 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     };
     f.render_widget(status_line, status);
     let mut keys = vec![("SPACE", "pause/resume"), ("+/-", "intensity ±5%"), ("n", "next segment"), ("q", "quit")];
+    if s.hr_suggestion.is_some() {
+        keys.extend([("a", "lower intensity"), ("x", "dismiss")]);
+    }
     if v.sim {
         keys.push(("s", "sim stop/start pedaling"));
     }

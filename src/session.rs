@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::config::HrZones;
 use crate::devices::{DeviceEvent, LinkStatus, Role, TrainerTarget};
 use crate::workout::Workout;
 
@@ -14,6 +15,16 @@ const AUTO_RESUME_AFTER: u32 = 2;
 /// so pushing off from a standstill isn't a wall.
 const SOFT_START_FROM: f64 = 0.5;
 const SOFT_START_SECS: u32 = 5;
+/// HR has to stay above the segment's ceiling this long before suggesting lower intensity.
+const HR_HIGH_AFTER: u32 = 60;
+/// HR lags behind power, so the start of a segment doesn't count.
+const HR_GRACE_SECS: u32 = 120;
+const HR_SUGGEST_COOLDOWN: u32 = 120;
+
+/// Power zone 1–6 for a fraction of FTP.
+pub fn power_zone(frac: f64) -> u8 {
+    [0.56, 0.76, 0.91, 1.06, 1.21].iter().take_while(|&&b| frac >= b).count() as u8 + 1
+}
 
 /// Latest sensor values; anything older than `STALE` reads as missing.
 #[derive(Default)]
@@ -128,6 +139,14 @@ pub enum RunState {
     Finished,
 }
 
+/// Heart rate above what the current segment calls for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HrSuggestion {
+    pub hr: u16,
+    /// Power zone of the segment, whose HR zone was exceeded.
+    pub zone: u8,
+}
+
 #[derive(Debug, Clone)]
 pub struct Sample {
     /// Seconds since ride start, pauses included.
@@ -159,6 +178,10 @@ pub struct Session {
     pub trace: Vec<Option<u16>>,
     pub auto_pause: bool,
     pub soft_start: bool,
+    pub hr_zones: Option<HrZones>,
+    pub hr_suggestion: Option<HrSuggestion>,
+    hr_high_secs: u32,
+    hr_cooldown: u32,
     /// Seconds of soft start remaining.
     soft_left: u32,
     /// Consecutive seconds with / without pedaling.
@@ -183,6 +206,10 @@ impl Session {
             trace: vec![None; n],
             auto_pause,
             soft_start: true,
+            hr_zones: None,
+            hr_suggestion: None,
+            hr_high_secs: 0,
+            hr_cooldown: 0,
             soft_left: 0,
             pedal_secs: 0,
             idle_secs: 0,
@@ -258,6 +285,46 @@ impl Session {
         self.intensity = ((self.intensity + delta) * 100.0).round().clamp(50.0, 150.0) / 100.0;
     }
 
+    /// Endurance and tempo segments only: harder efforts are expected to push HR up.
+    fn hr_ceiling(&self) -> Option<(u8, u16)> {
+        let zones = self.hr_zones?;
+        let seg = self.workout.segment_at(self.pos as f64)?;
+        if self.pos - seg.start < HR_GRACE_SECS {
+            return None;
+        }
+        let zone = power_zone(seg.power_at(self.pos as f64)? * self.intensity);
+        (2..=3).contains(&zone).then(|| (zone, zones.0[zone as usize - 1]))
+    }
+
+    fn update_hr_check(&mut self, hr: Option<u16>) {
+        self.hr_cooldown = self.hr_cooldown.saturating_sub(1);
+        let high = match (hr, self.hr_ceiling()) {
+            (Some(hr), Some((zone, max))) if self.state == RunState::Running && hr > max => Some(HrSuggestion { hr, zone }),
+            _ => None,
+        };
+        let Some(high) = high else {
+            self.hr_high_secs = 0;
+            self.hr_suggestion = None;
+            return;
+        };
+        self.hr_high_secs += 1;
+        if self.hr_suggestion.is_some() || (self.hr_high_secs >= HR_HIGH_AFTER && self.hr_cooldown == 0) {
+            self.hr_suggestion = Some(high);
+        }
+    }
+
+    /// Closes the HR suggestion, lowering intensity if `accept`.
+    pub fn answer_hr_suggestion(&mut self, accept: bool) {
+        if self.hr_suggestion.take().is_none() {
+            return;
+        }
+        if accept {
+            self.adjust_intensity(-0.05);
+        }
+        self.hr_high_secs = 0;
+        self.hr_cooldown = HR_SUGGEST_COOLDOWN;
+    }
+
     pub fn skip_segment(&mut self) {
         if let Some(i) = self.workout.segment_index_at(self.pos as f64) {
             self.pos = self.workout.segments[i].end();
@@ -281,6 +348,7 @@ impl Session {
             }
             _ => self.clock += 1,
         }
+        self.update_hr_check(s.hr());
         let target = self.target_watts();
         let power = s.instant_power();
         if let Some(slot) = self.trace.get_mut(self.pos as usize) {
@@ -450,6 +518,63 @@ mod tests {
             s.tick(&Sensors::default());
         }
         assert_eq!(s.state, RunState::Running);
+    }
+
+    fn with_hr(power: i16, bpm: u16) -> Sensors {
+        let mut s = riding(Some(power), Some(90.0));
+        s.apply(DeviceEvent::Hr(crate::protocol::HeartRate { bpm, contact: Some(true), rr_ms: vec![] }));
+        s
+    }
+
+    fn endurance(secs: u32) -> Session {
+        let xml = format!(r#"<workout_file><name>Z2</name><workout><SteadyState Duration="{secs}" Power="0.65"/><SteadyState Duration="600" Power="1.0"/></workout></workout_file>"#);
+        let mut s = Session::new(Workout::parse(&xml).unwrap(), 200, 75.0, true);
+        s.soft_start = false;
+        s.hr_zones = Some(HrZones([114, 133, 152, 171]));
+        s.toggle_pause();
+        s
+    }
+
+    #[test]
+    fn power_zones() {
+        assert_eq!([0.5, 0.56, 0.75, 0.9, 1.0, 1.1, 1.5].map(power_zone), [1, 2, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn high_hr_suggests_lower_intensity() {
+        let mut s = endurance(1200);
+        let high = with_hr(130, 140);
+        for _ in 0..HR_GRACE_SECS + HR_HIGH_AFTER - 1 {
+            s.tick(&high);
+        }
+        assert_eq!(s.hr_suggestion, None);
+        s.tick(&high);
+        assert_eq!(s.hr_suggestion, Some(HrSuggestion { hr: 140, zone: 2 }));
+        s.answer_hr_suggestion(true);
+        assert_eq!((s.hr_suggestion, s.intensity), (None, 0.95));
+        for _ in 0..HR_SUGGEST_COOLDOWN - 1 {
+            s.tick(&high);
+        }
+        assert_eq!(s.hr_suggestion, None);
+        s.tick(&high);
+        assert!(s.hr_suggestion.is_some());
+        s.tick(&with_hr(130, 120));
+        assert_eq!(s.hr_suggestion, None);
+    }
+
+    #[test]
+    fn no_hr_suggestion_for_hard_segments_or_without_zones() {
+        let mut s = endurance(60);
+        for _ in 0..600 {
+            s.tick(&with_hr(200, 185));
+        }
+        assert_eq!(s.hr_suggestion, None);
+        let mut s = endurance(1200);
+        s.hr_zones = None;
+        for _ in 0..600 {
+            s.tick(&with_hr(130, 185));
+        }
+        assert_eq!(s.hr_suggestion, None);
     }
 
     #[test]

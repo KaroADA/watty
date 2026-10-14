@@ -106,12 +106,13 @@ async fn ride(
     let mut devices = start_devices(trainer, hr, &dev, true).await?;
     let mut session = Session::new(workout, ftp, weight, cfg.auto_pause);
     session.soft_start = cfg.soft_start;
+    let hr_zones = cfg.hr_zones()?;
+    session.hr_zones = hr_zones;
     let mut sensors = Sensors::default();
     let mut recorder: Option<Recorder> = None;
     let mut message: Option<(Instant, String)> = None;
     let mut confirm_quit = false;
     let mut zoom = ChartZoom::new();
-    let hr_zones = cfg.hr_zones()?;
 
     let mut tick = interval(Duration::from_secs_f64(1.0 / dev.speed.max(0.1)));
     tick.set_missed_tick_behavior(MissedTickBehavior::Burst);
@@ -156,6 +157,8 @@ async fn ride(
                     KeyCode::Char('+') | KeyCode::Char('=') => session.adjust_intensity(0.05),
                     KeyCode::Char('-') => session.adjust_intensity(-0.05),
                     KeyCode::Char('n') => session.skip_segment(),
+                    KeyCode::Char('a') => session.answer_hr_suggestion(true),
+                    KeyCode::Char('x') => session.answer_hr_suggestion(false),
                     KeyCode::Char('s') => if let Some(c) = &devices.coasting {
                         c.fetch_xor(true, Ordering::Relaxed);
                     },

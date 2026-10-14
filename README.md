@@ -20,4 +20,5 @@ cargo build --release
 - `keep_awake` (default on) stops the screen from dimming or locking during a ride: via `org.freedesktop.ScreenSaver` (GNOME, KDE, Xfce), `systemd-inhibit` (e.g. hypridle), and on Omarchy by tagging the terminal window `noidle`.
 - `soft_start` (default on): while paused ERG drops to 50% of the target, and after starting or resuming it climbs back to 100% over 5 s.
 - Auto-pause (`auto_pause`, default on): pauses after 3 s without pedaling (power under 15 W and no cadence, so a cadence sensor is optional) and resumes after 2 s of pedaling. A manual pause only resumes with `space`.
+- With HR zones set, if heart rate stays above the zone matching an endurance or tempo segment (power zone 2–3) for 60 s, after the first 2 min of the segment, the status line suggests lowering intensity: `a` lowers it 5%, `x` dismisses; it won't ask again for 2 min.
 - Ride keys: `space` start/pause, `+`/`-` intensity ±5%, `n` next segment, `q` quit (confirm); with `--sim`, `s` stops/starts simulated pedaling.
