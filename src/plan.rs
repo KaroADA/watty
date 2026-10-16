@@ -141,6 +141,7 @@ mod tests {
                 intensity: 1.0,
                 finished: true,
                 closed: false,
+                strava_id: None,
             }),
             modified: std::time::SystemTime::now(),
         };

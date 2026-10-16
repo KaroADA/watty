@@ -14,8 +14,10 @@ use tracing::{error, info};
 use crate::awake::KeepAwake;
 use crate::ble::Ble;
 use crate::config::{self, Config};
+use crate::history;
 use crate::recorder::{RideMeta, Recorder};
 use crate::session::{RunState, Sensors, Session};
+use crate::strava;
 use crate::ui::{self, ChartZoom, Picker, View};
 use crate::workout::{Workout, fmt_duration};
 use crate::{DeviceArgs, Devices, start_devices};
@@ -87,18 +89,32 @@ pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: b
     let setup = RideSetup { workout, workout_path, resume: None, ftp, weight, select, dev };
     let result = ride(&mut terminal, &mut keys, &mut cfg, setup).await;
     ratatui::restore();
-    let summary = result?;
+    let (summary, saved) = result?;
     println!("{summary}");
+    if let Some(ride) = saved.as_deref().and_then(history::ride_file)
+        && cfg.strava_upload
+        && strava::load_tokens().is_some()
+    {
+        println!("uploading to Strava...");
+        match strava::Client::load(&cfg).await {
+            Ok(client) => match client.upload(&ride, &cfg).await {
+                Ok(id) => println!("Strava: https://www.strava.com/activities/{id}"),
+                Err(e) => println!("Strava upload failed: {e:#}"),
+            },
+            Err(e) => println!("Strava upload failed: {e:#}"),
+        }
+    }
     Ok(())
 }
 
-/// Runs a ride on an already initialized terminal and returns its summary.
+/// Runs a ride on an already initialized terminal. Returns its summary and, for a saved
+/// real (not simulated) ride, its journal.
 pub async fn ride(
     terminal: &mut DefaultTerminal,
     keys: &mut mpsc::UnboundedReceiver<Event>,
     cfg: &mut Config,
     setup: RideSetup,
-) -> Result<String> {
+) -> Result<(String, Option<PathBuf>)> {
     let RideSetup { workout, workout_path, resume, ftp, weight, select, dev } = setup;
     let _awake = cfg.keep_awake.then(KeepAwake::start);
     let mut trainer = dev.trainer.clone().or(cfg.trainer.clone());
@@ -107,7 +123,7 @@ pub async fn ride(
     if !dev.sim && (trainer.is_none() || select) {
         let ble = Ble::new().await?;
         let Some((t, h)) = pick_devices(terminal, keys, &ble, trainer, hr).await? else {
-            return Ok("cancelled".into());
+            return Ok(("cancelled".into(), None));
         };
         (trainer, hr) = (Some(t), h);
         cfg.trainer = trainer.clone();
@@ -208,6 +224,7 @@ pub async fn ride(
                             intensity: session.intensity,
                             finished: false,
                             closed: false,
+                            strava_id: None,
                         };
                         match Recorder::create(&rides_dir, meta) {
                             Ok(r) => recorder = Some(r),
@@ -252,6 +269,7 @@ pub async fn ride(
         fmt_duration(session.pos.min(session.workout.total_duration())),
         fmt_duration(session.workout.total_duration()),
     );
+    let mut saved = None;
     if let Some(r) = recorder.take_if(|_| discard) {
         match r.discard() {
             Ok(()) => out += "\nride discarded",
@@ -262,13 +280,16 @@ pub async fn ride(
         r.meta.finished |= session.state == RunState::Finished;
         let (csv, tcx) = (r.csv_path().to_path_buf(), r.tcx_path().to_path_buf());
         match r.finish() {
-            Ok(n) => out += &format!("\n{n} samples\nTCX: {}\nCSV: {}", tcx.display(), csv.display()),
+            Ok(n) => {
+                out += &format!("\n{n} samples\nTCX: {}\nCSV: {}", tcx.display(), csv.display());
+                saved = (!dev.sim && n > 0).then_some(csv);
+            }
             Err(e) => out += &format!("\nTCX write failed: {e:#}\nrecover with: watty export {}", csv.display()),
         }
     } else {
         out += "\nnothing recorded";
     }
-    Ok(out)
+    Ok((out, saved))
 }
 
 async fn shutdown(devices: &mut Devices) {

@@ -14,6 +14,7 @@ mod ride;
 mod session;
 mod settings;
 mod sim;
+mod strava;
 mod ui;
 mod workout;
 
@@ -121,6 +122,19 @@ enum Cmd {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Strava account and uploads
+    #[command(subcommand)]
+    Strava(StravaCmd),
+}
+
+#[derive(Subcommand)]
+enum StravaCmd {
+    /// Log in to Strava in the browser
+    Connect,
+    /// Forget the Strava account and revoke access
+    Disconnect,
+    /// Upload a ride (its CSV journal) to Strava
+    Upload { csv: PathBuf },
 }
 
 /// `ride` logs to a file (incl. raw BLE bytes) since the TUI owns the terminal.
@@ -167,7 +181,29 @@ async fn main() -> Result<()> {
             println!("{n} samples -> {}", path.display());
             Ok(())
         }
+        Cmd::Strava(cmd) => strava_cmd(&cfg, cmd).await,
     }
+}
+
+async fn strava_cmd(cfg: &Config, cmd: StravaCmd) -> Result<()> {
+    match cmd {
+        StravaCmd::Connect => {
+            let login = strava::Login::start(cfg).await?;
+            eprintln!("Authorize watty in the browser. If it didn't open, visit:\n{}", login.url);
+            let athlete = login.finish().await?;
+            println!("connected as {athlete}");
+        }
+        StravaCmd::Disconnect => {
+            strava::disconnect().await?;
+            println!("disconnected");
+        }
+        StravaCmd::Upload { csv } => {
+            let Some(ride) = history::ride_file(&csv) else { bail!("not a ride journal: {}", csv.display()) };
+            let id = strava::Client::load(cfg).await?.upload(&ride, cfg).await?;
+            println!("https://www.strava.com/activities/{id}");
+        }
+    }
+    Ok(())
 }
 
 fn parse_cmd(file: &std::path::Path, ftp: Option<u32>) -> Result<()> {

@@ -62,7 +62,10 @@ impl RideView {
         parts.push(format!("{:.0} kJ", s.kj));
         let width = area.width.saturating_sub(2) as usize;
         let header_lines = crate::calendar::join_wrapped(&parts, "  ·  ", width);
-        let title = format!("{} · {}", self.ride.started.format("%a %-d %b %H:%M"), self.ride.name());
+        let mut title = format!("{} · {}", self.ride.started.format("%a %-d %b %H:%M"), self.ride.name());
+        if self.ride.meta.as_ref().is_some_and(|m| m.strava_id.is_some()) {
+            title += " · on Strava";
+        }
 
         let charts = self.charts();
         let header_h = header_lines.len() as u16 + 2;

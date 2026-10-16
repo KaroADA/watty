@@ -34,6 +34,12 @@ pub struct Config {
     pub soft_start: bool,
     /// Where `.zwo` files are listed from; defaults to `~/.local/share/watty/workouts`.
     pub workouts_dir: Option<PathBuf>,
+    /// Upload each saved ride to Strava.
+    #[serde(default = "default_true")]
+    pub strava_upload: bool,
+    /// Own Strava API app instead of `WATTY_STRAVA_CLIENT_ID` / `WATTY_STRAVA_CLIENT_SECRET`.
+    pub strava_client_id: Option<String>,
+    pub strava_client_secret: Option<String>,
 }
 
 fn default_segment_warning() -> u32 {
@@ -63,6 +69,9 @@ impl Default for Config {
             keep_awake: true,
             soft_start: true,
             workouts_dir: None,
+            strava_upload: true,
+            strava_client_id: None,
+            strava_client_secret: None,
         }
     }
 }

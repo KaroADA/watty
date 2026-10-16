@@ -27,9 +27,11 @@ enum Field {
     WorkoutsDir,
     Trainer,
     HrSensor,
+    Strava,
+    StravaUpload,
 }
 
-const FIELDS: [Field; 12] = [
+const FIELDS: [Field; 14] = [
     Field::Ftp,
     Field::Weight,
     Field::MaxHr,
@@ -42,6 +44,8 @@ const FIELDS: [Field; 12] = [
     Field::WorkoutsDir,
     Field::Trainer,
     Field::HrSensor,
+    Field::Strava,
+    Field::StravaUpload,
 ];
 
 impl Field {
@@ -59,6 +63,8 @@ impl Field {
             Field::WorkoutsDir => "Workouts folder",
             Field::Trainer => "Trainer",
             Field::HrSensor => "HR sensor",
+            Field::Strava => "Strava",
+            Field::StravaUpload => "Upload to Strava",
         }
     }
 
@@ -76,11 +82,13 @@ impl Field {
             Field::WorkoutsDir => "Folder with .zwo files. Empty = ~/.local/share/watty/workouts.",
             Field::Trainer => "FTMS smart trainer. Enter opens the device picker.",
             Field::HrSensor => "Heart-rate strap. Enter opens the device picker.",
+            Field::Strava => "Strava account. Enter connects it in the browser, or disconnects it.",
+            Field::StravaUpload => "Upload each saved ride to Strava right after it ends. Any ride can also be uploaded from Activities with `u`.",
         }
     }
 
     fn is_bool(self) -> bool {
-        matches!(self, Field::AutoPause | Field::KeepAwake | Field::SoftStart)
+        matches!(self, Field::AutoPause | Field::KeepAwake | Field::SoftStart | Field::StravaUpload)
     }
 
     fn is_device(self) -> bool {
@@ -103,6 +111,8 @@ impl Field {
             Field::WorkoutsDir => opt(cfg.workouts_dir.as_ref().map(|p| p.display().to_string())),
             Field::Trainer => opt(cfg.trainer.clone()),
             Field::HrSensor => opt(cfg.hr.clone()),
+            Field::StravaUpload => on_off(cfg.strava_upload),
+            Field::Strava => String::new(),
         }
     }
 
@@ -115,6 +125,7 @@ impl Field {
                 _ => "off".into(),
             },
             Field::MaxHr => "off".into(),
+            Field::Strava => "not connected".into(),
             Field::WorkoutsDir => format!("default ({})", tilde(&cfg.workouts_dir().display().to_string())),
             _ => "none".into(),
         }
@@ -154,8 +165,9 @@ impl Field {
             Field::AutoPause => cfg.auto_pause = !cfg.auto_pause,
             Field::KeepAwake => cfg.keep_awake = !cfg.keep_awake,
             Field::SoftStart => cfg.soft_start = !cfg.soft_start,
+            Field::StravaUpload => cfg.strava_upload = !cfg.strava_upload,
             Field::WorkoutsDir => cfg.workouts_dir = (!text.is_empty()).then(|| PathBuf::from(expand_home(text))),
-            Field::Trainer | Field::HrSensor => {}
+            Field::Trainer | Field::HrSensor | Field::Strava => {}
         }
         Ok(())
     }
@@ -173,6 +185,8 @@ pub enum Action {
     /// Config changed and was saved.
     Saved,
     PickDevices,
+    StravaConnect,
+    StravaDisconnect,
     Error(String),
 }
 
@@ -180,15 +194,21 @@ pub struct Settings {
     list: ListState,
     /// Text being typed for the selected field.
     editing: Option<String>,
+    /// Name of the connected Strava athlete.
+    pub strava_athlete: Option<String>,
+    /// Waiting for the user to confirm disconnecting Strava.
+    pub disconnecting: bool,
 }
 
 impl Settings {
     pub fn new() -> Self {
-        Self { list: ListState::default().with_selected(Some(0)), editing: None }
+        let strava_athlete = crate::strava::load_tokens().map(|t| t.athlete);
+        Self { list: ListState::default().with_selected(Some(0)), editing: None, strava_athlete, disconnecting: false }
     }
 
+    /// Keys go to the settings instead of switching tabs or quitting.
     pub fn editing(&self) -> bool {
-        self.editing.is_some()
+        self.editing.is_some() || self.disconnecting
     }
 
     fn field(&self) -> Field {
@@ -202,6 +222,10 @@ impl Settings {
 
     pub fn key(&mut self, code: KeyCode, cfg: &mut Config) -> Action {
         let field = self.field();
+        if self.disconnecting {
+            self.disconnecting = false;
+            return if code == KeyCode::Char('y') { Action::StravaDisconnect } else { Action::None };
+        }
         if let Some(text) = &mut self.editing {
             match code {
                 KeyCode::Char(c) => text.push(c),
@@ -221,6 +245,12 @@ impl Settings {
             KeyCode::Up | KeyCode::Char('k') => self.list.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.list.select(Some((self.list.selected().unwrap_or(0) + 1).min(FIELDS.len() - 1))),
             KeyCode::Enter | KeyCode::Char(' ') if field.is_device() => return Action::PickDevices,
+            KeyCode::Enter | KeyCode::Char(' ') if field == Field::Strava => {
+                if self.strava_athlete.is_none() {
+                    return Action::StravaConnect;
+                }
+                self.disconnecting = true;
+            }
             KeyCode::Enter | KeyCode::Char(' ') if field.is_bool() => return apply(cfg, field, ""),
             KeyCode::Enter => self.editing = Some(field.get(cfg)),
             _ => {}
@@ -236,6 +266,14 @@ impl Settings {
             .map(|&field| {
                 let value = match &self.editing {
                     Some(text) if field == selected => Span::styled(format!("{text}▏"), Style::new().fg(Color::Yellow)),
+                    _ if field == Field::Strava && self.disconnecting => {
+                        Span::styled("disconnect? [y] yes  [n] no", Style::new().fg(Color::Yellow))
+                    }
+                    _ if field == Field::Strava => match &self.strava_athlete {
+                        Some(name) if name.is_empty() => Span::raw("connected"),
+                        Some(name) => Span::raw(format!("connected as {name}")),
+                        None => Span::styled(field.placeholder(cfg), Style::new().fg(Color::DarkGray)),
+                    },
                     _ => match field.get(cfg) {
                         v if v.is_empty() => Span::styled(field.placeholder(cfg), Style::new().fg(Color::DarkGray)),
                         v => Span::raw(v),

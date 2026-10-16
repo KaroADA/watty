@@ -23,12 +23,15 @@ use crate::workout::fmt_duration;
 
 const CELL: usize = 6;
 
+pub const STRAVA: Color = Color::Rgb(252, 76, 2);
+
 pub enum Action {
     None,
     Ride(PathBuf),
     Resume(RideFile),
     /// A ride was deleted, so the ride list needs reloading.
     Deleted,
+    Upload(RideFile),
     Error(String, String),
 }
 
@@ -69,11 +72,11 @@ impl Calendar {
         if self.deleting.is_some() {
             vec![("y", "delete"), ("n", "keep")]
         } else if self.open.is_some() {
-            vec![("x", "delete"), ("Esc", "back")]
+            vec![("u", "upload to Strava"), ("x", "delete"), ("Esc", "back")]
         } else if self.adding.is_some() {
             vec![("↑/↓", "select"), ("Enter", "plan"), ("Esc", "cancel")]
         } else if self.focus.is_some() {
-            vec![("↑/↓", "select"), ("Enter", "open"), ("x", "delete"), ("r", "resume"), ("Esc", "back")]
+            vec![("↑/↓", "select"), ("Enter", "open"), ("u", "upload to Strava"), ("x", "delete"), ("r", "resume"), ("Esc", "back")]
         } else {
             vec![
                 ("←→↑↓", "day"),
@@ -99,6 +102,15 @@ impl Calendar {
                 Action::None
             }
             Err(e) => Action::Error("Cannot open ride".into(), format!("{e:#}")),
+        }
+    }
+
+    /// Picks up changes of the open ride, e.g. after an upload.
+    pub fn refresh_open(&mut self, rides: &[RideFile]) {
+        if let Some(view) = &mut self.open
+            && let Some(r) = rides.iter().find(|r| r.csv == view.ride.csv)
+        {
+            view.ride = r.clone();
         }
     }
 
@@ -150,6 +162,7 @@ impl Calendar {
             match code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.open = None,
                 KeyCode::Char('x') => self.deleting = Some(view.ride.clone()),
+                KeyCode::Char('u') => return Action::Upload(view.ride.clone()),
                 _ => {}
             }
             return Action::None;
@@ -171,6 +184,11 @@ impl Calendar {
                     }
                 }
                 KeyCode::Char('x') => self.deleting = day_rides.get(i).map(|r| (*r).clone()),
+                KeyCode::Char('u') => {
+                    if let Some(r) = day_rides.get(i) {
+                        return Action::Upload((*r).clone());
+                    }
+                }
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h') => self.focus = None,
                 _ => {}
             }
@@ -371,10 +389,14 @@ impl Calendar {
             let finished = r.meta.as_ref().is_none_or(|m| m.finished);
             let selected = self.focus == Some(i);
             let name_style = if selected { LABEL.add_modifier(Modifier::REVERSED) } else { LABEL };
-            lines.push(Line::from(vec![
+            let mut title = vec![
                 Span::styled(if selected { "▶ " } else { "● " }, Style::new().fg(Color::Green)),
                 Span::styled(format!("{}  {}", r.started.format("%H:%M"), r.name()), name_style),
-            ]));
+            ];
+            if r.meta.as_ref().is_some_and(|m| m.strava_id.is_some()) {
+                title.push(Span::styled("  Strava ✓", Style::new().fg(STRAVA)));
+            }
+            lines.push(Line::from(title));
             if !finished {
                 let resume = if r.resumable() { " · [r] resume" } else { "" };
                 lines.push(Line::styled(format!("  unfinished{resume}"), Style::new().fg(Color::Yellow)));

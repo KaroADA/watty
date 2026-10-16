@@ -40,21 +40,20 @@ impl RideFile {
 /// Rides in `dir` (not its subfolders), oldest first.
 pub fn list(dir: &Path) -> Vec<RideFile> {
     let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
-    let mut rides: Vec<RideFile> = entries
-        .flatten()
-        .filter_map(|e| {
-            let csv = e.path();
-            if csv.extension()? != "csv" {
-                return None;
-            }
-            let stem = csv.file_stem()?.to_str()?;
-            let started = NaiveDateTime::parse_from_str(stem.get(..17)?, "%Y-%m-%d_%H%M%S").ok()?;
-            let modified = e.metadata().ok()?.modified().ok()?;
-            Some(RideFile { meta: load_meta(&csv), csv, started, modified })
-        })
-        .collect();
+    let mut rides: Vec<RideFile> = entries.flatten().filter_map(|e| ride_file(&e.path())).collect();
     rides.sort_by_key(|r| r.started);
     rides
+}
+
+/// The ride recorded in `csv`, if it's a ride journal.
+pub fn ride_file(csv: &Path) -> Option<RideFile> {
+    if csv.extension()? != "csv" {
+        return None;
+    }
+    let stem = csv.file_stem()?.to_str()?;
+    let started = NaiveDateTime::parse_from_str(stem.get(..17)?, "%Y-%m-%d_%H%M%S").ok()?;
+    let modified = std::fs::metadata(csv).ok()?.modified().ok()?;
+    Some(RideFile { meta: load_meta(csv), csv: csv.to_path_buf(), started, modified })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +135,7 @@ mod tests {
             intensity: 1.0,
             finished: false,
             closed: false,
+            strava_id: None,
         };
         let r = Recorder::create(&dir, meta.clone()).unwrap();
         let csv = r.csv_path().to_path_buf();

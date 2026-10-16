@@ -30,6 +30,8 @@ pub struct RideMeta {
     /// Declined when offered for resuming.
     #[serde(default)]
     pub closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strava_id: Option<u64>,
 }
 
 pub fn meta_path(csv: &Path) -> PathBuf {
@@ -304,7 +306,7 @@ mod tests {
     }
 
     fn meta() -> RideMeta {
-        RideMeta { workout: "Sweet Spot 3x10".into(), workout_path: None, ftp: 250, intensity: 1.0, finished: false, closed: false }
+        RideMeta { workout: "Sweet Spot 3x10".into(), workout_path: None, ftp: 250, intensity: 1.0, finished: false, closed: false, strava_id: None }
     }
 
     #[test]
@@ -366,6 +368,15 @@ mod tests {
         let (_, samples) = read_journal(&csv).unwrap();
         assert_eq!((samples.len(), samples[0].power, samples[0].pos), (1, Some(200), 0));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn meta_without_strava_id_loads() {
+        let old = r#"{"workout":"Z2","workout_path":null,"ftp":250,"intensity":1.0,"finished":true}"#;
+        let meta: RideMeta = serde_json::from_str(old).unwrap();
+        assert_eq!(meta.strava_id, None);
+        let uploaded = RideMeta { strava_id: Some(42), ..meta };
+        assert_eq!(serde_json::from_str::<RideMeta>(&serde_json::to_string(&uploaded).unwrap()).unwrap(), uploaded);
     }
 
     #[test]

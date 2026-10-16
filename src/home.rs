@@ -22,6 +22,7 @@ use crate::library::{self, Entry};
 use crate::recorder::{read_journal, save_meta};
 use crate::ride::{self, RideSetup, key_press, spawn_keys};
 use crate::session::Session;
+use crate::strava;
 use crate::ui::{Chart, HINT, LABEL, centered, key_hints, panel, tilde};
 use crate::workout::{Workout, fmt_duration};
 
@@ -51,6 +52,11 @@ struct Home {
     resume: Option<(RideFile, u32)>,
     calendar: Calendar,
     settings: Settings,
+    strava: mpsc::UnboundedSender<strava::Event>,
+    /// Strava login waiting for the browser: consent page URL and the waiting task.
+    login: Option<(String, tokio::task::AbortHandle)>,
+    /// Progress of background work, shown in the footer.
+    status: Option<String>,
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
@@ -62,6 +68,7 @@ pub async fn run(cfg: Config) -> Result<()> {
 }
 
 async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver<Event>, cfg: Config) -> Result<()> {
+    let (strava_tx, mut strava_rx) = mpsc::unbounded_channel();
     let mut h = Home {
         cfg,
         tab: Tab::Workouts,
@@ -72,6 +79,9 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
         resume: None,
         calendar: Calendar::new(),
         settings: Settings::new(),
+        strava: strava_tx,
+        login: None,
+        status: None,
     };
     h.reload_workouts();
     h.reload_rides();
@@ -92,12 +102,23 @@ async fn home(terminal: &mut DefaultTerminal, keys: &mut mpsc::UnboundedReceiver
         terminal.draw(|f| draw(f, &mut h))?;
         let ev = tokio::select! {
             Some(ev) = keys.recv() => ev,
+            Some(ev) = strava_rx.recv() => {
+                h.strava_event(ev);
+                continue;
+            }
             _ = term.recv() => return Ok(()),
             _ = hangup.recv() => return Ok(()),
         };
         let Some((code, mods)) = key_press(&ev) else { continue };
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
             return Ok(());
+        }
+        if let Some((_, task)) = &h.login {
+            if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
+                task.abort();
+                h.login = None;
+            }
+            continue;
         }
         if let Some((ride, _)) = &h.resume {
             match code {
@@ -182,6 +203,23 @@ impl Home {
             settings::Action::None => {}
             settings::Action::Saved => self.reload_workouts(),
             settings::Action::Error(e) => self.error("Invalid value", e),
+            settings::Action::StravaConnect => match strava::Login::start(&self.cfg).await {
+                Ok(login) => {
+                    let url = login.url.clone();
+                    let tx = self.strava.clone();
+                    let task = tokio::spawn(async move {
+                        let _ = tx.send(strava::Event::Connected(login.finish().await));
+                    });
+                    self.login = Some((url, task.abort_handle()));
+                }
+                Err(e) => self.error("Cannot connect to Strava", format!("{e:#}")),
+            },
+            settings::Action::StravaDisconnect => {
+                if let Err(e) = strava::disconnect().await {
+                    self.error("Cannot disconnect from Strava", format!("{e:#}"));
+                }
+                self.settings.strava_athlete = strava::load_tokens().map(|t| t.athlete);
+            }
             settings::Action::PickDevices => {
                 let picked = match Ble::new().await {
                     Ok(ble) => ride::pick_devices(terminal, keys, &ble, self.cfg.trainer.clone(), self.cfg.hr.clone()).await,
@@ -215,6 +253,7 @@ impl Home {
             calendar::Action::None => {}
             calendar::Action::Error(title, text) => self.error(&title, text),
             calendar::Action::Deleted => self.reload_rides(),
+            calendar::Action::Upload(ride) => self.upload(ride),
             calendar::Action::Resume(ride) => self.resume_ride(terminal, keys, ride).await,
             calendar::Action::Ride(path) => {
                 let loaded = match self.workouts.iter().find(|e| e.path == path) {
@@ -240,6 +279,46 @@ impl Home {
 
     fn reload_rides(&mut self) {
         self.rides = history::list(&config::rides_dir());
+        self.calendar.refresh_open(&self.rides);
+    }
+
+    fn upload(&mut self, ride: RideFile) {
+        if ride.meta.as_ref().is_some_and(|m| m.strava_id.is_some()) {
+            self.status = Some("Already on Strava".into());
+            return;
+        }
+        self.status = Some(format!("Uploading {} to Strava…", ride.name()));
+        let (tx, cfg) = (self.strava.clone(), self.cfg.clone());
+        tokio::spawn(async move {
+            let result = async { strava::Client::load(&cfg).await?.upload(&ride, &cfg).await }.await;
+            let _ = tx.send(strava::Event::Uploaded(ride.csv, result));
+        });
+    }
+
+    fn strava_event(&mut self, ev: strava::Event) {
+        match ev {
+            strava::Event::Connected(result) => {
+                self.login = None;
+                match result {
+                    Ok(athlete) => {
+                        self.status = Some(format!("Connected to Strava as {athlete}"));
+                        self.settings.strava_athlete = Some(athlete);
+                    }
+                    Err(e) => self.error("Cannot connect to Strava", format!("{e:#}")),
+                }
+            }
+            strava::Event::Uploaded(csv, result) => {
+                self.reload_rides();
+                let name = self.rides.iter().find(|r| r.csv == csv).map(|r| r.name()).unwrap_or_default();
+                match result {
+                    Ok(_) => self.status = Some(format!("{name} uploaded to Strava")),
+                    Err(e) => {
+                        self.status = None;
+                        self.error("Strava upload failed", format!("{name}\n{e:#}"));
+                    }
+                }
+            }
+        }
     }
 
     fn error(&mut self, title: &str, text: String) {
@@ -300,9 +379,16 @@ impl Home {
         self.reload_rides();
         let _ = terminal.clear();
         match result {
-            Ok(summary) => {
+            Ok((summary, saved)) => {
                 let lines = summary.lines().map(tilde).collect();
-                self.popup = Some(Popup { title: "Ride summary".into(), lines, error: false })
+                self.popup = Some(Popup { title: "Ride summary".into(), lines, error: false });
+                let saved = saved.and_then(|csv| self.rides.iter().find(|r| r.csv == csv).cloned());
+                if let Some(ride) = saved
+                    && self.cfg.strava_upload
+                    && self.settings.strava_athlete.is_some()
+                {
+                    self.upload(ride);
+                }
             }
             Err(e) => self.error("Ride failed", format!("{e:#}")),
         }
@@ -332,7 +418,9 @@ fn draw(f: &mut Frame, h: &mut Home) {
         }
         Tab::Settings => {
             h.settings.draw(f, body, &h.cfg);
-            if h.settings.editing() {
+            if h.settings.disconnecting {
+                keys = vec![("y", "disconnect"), ("n", "keep")];
+            } else if h.settings.editing() {
                 keys = vec![("Enter", "save"), ("Esc", "cancel")];
             } else {
                 keys.splice(0..0, [("↑/↓", "select"), ("Enter", "change")]);
@@ -340,6 +428,9 @@ fn draw(f: &mut Frame, h: &mut Home) {
         }
     }
     f.render_widget(key_hints(&keys), footer);
+    if let Some(status) = &h.status {
+        f.render_widget(Line::styled(format!("{status} "), Style::new().fg(Color::Cyan)).right_aligned(), footer);
+    }
 
     if let Some(p) = &h.popup {
         draw_popup(f, p);
@@ -347,6 +438,27 @@ fn draw(f: &mut Frame, h: &mut Home) {
     if let Some((ride, ridden)) = &h.resume {
         draw_resume(f, ride, *ridden);
     }
+    if let Some((url, _)) = &h.login {
+        draw_login(f, url);
+    }
+}
+
+fn draw_login(f: &mut Frame, url: &str) {
+    let area = centered(f.area(), 72, 12);
+    let block = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(Color::Yellow))
+        .title(Span::styled(" Connect Strava ", Style::new().fg(Color::Yellow).bold()))
+        .title_bottom(Line::styled(" Esc cancel ", HINT).right_aligned());
+    let lines = vec![
+        Line::raw(""),
+        Line::raw("Authorize watty in the browser that just opened."),
+        Line::raw(""),
+        Line::styled("If it didn't open, visit:", HINT),
+        Line::styled(url, HINT),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block.padding(ratatui::widgets::Padding::horizontal(1))), area);
 }
 
 fn draw_workouts(f: &mut Frame, area: Rect, h: &mut Home) {
