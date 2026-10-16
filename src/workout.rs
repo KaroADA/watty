@@ -4,6 +4,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+const RAMP_START_W: u32 = 100;
+const RAMP_STEP_W: u32 = 20;
+const RAMP_STEP_SECS: u32 = 60;
+/// The ramp test's own warmup climbs from here to `RAMP_START_W`.
+const RAMP_WARMUP_FROM_W: u32 = 60;
+/// Ramp tests don't need an FTP; this one just scales the warmup and the chart.
+pub const RAMP_DEFAULT_FTP: u32 = 200;
+/// FTP as a fraction of the best minute.
+pub const RAMP_FTP_FACTOR: f64 = 0.75;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentKind {
     Warmup,
@@ -62,6 +72,24 @@ pub struct Workout {
     pub name: String,
     pub description: String,
     pub segments: Vec<Segment>,
+    /// Ends with a ramp test (`<RampTest/>`), whose segments are added by `plan_ramp`.
+    pub ramp: Option<RampTest>,
+}
+
+/// Steps in watts, not FTP fractions: FTP is what the test measures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RampTest {
+    /// Offset of the ramp test in the workout, seconds.
+    pub start: u32,
+    /// Warmup within the ramp test, seconds.
+    pub warmup: u32,
+}
+
+impl RampTest {
+    /// Where the steps start.
+    pub fn steps_start(&self) -> u32 {
+        self.start + self.warmup
+    }
 }
 
 impl Workout {
@@ -92,6 +120,7 @@ impl Workout {
             .ok_or_else(|| anyhow!("missing <workout> element"))?;
 
         let mut segments = Vec::new();
+        let mut ramp = None;
         let mut t = 0u32;
         let mut push = |kind, duration: u32, a: Option<f64>, b: Option<f64>, cadence: Option<u16>| {
             if duration > 0 {
@@ -103,6 +132,9 @@ impl Workout {
         for el in body.children().filter(|n| n.is_element()) {
             let tag = el.tag_name().name();
             let ctx = || format!("<{tag}> at line {}", doc.text_pos_at(el.range().start).row);
+            if ramp.is_some() {
+                bail!("<RampTest> must be the last element, found <{tag}> after it");
+            }
             let cadence = rpm(&el, "Cadence").with_context(ctx)?;
             match tag {
                 "Warmup" | "Cooldown" | "Ramp" => {
@@ -138,14 +170,20 @@ impl Workout {
                     let d = duration(&el, "Duration").with_context(ctx)?;
                     push(SegmentKind::FreeRide, d, None, None, cadence);
                 }
+                "RampTest" => {
+                    let warmup = if attr(&el, "Warmup").is_some() { duration(&el, "Warmup").with_context(ctx)? } else { 0 };
+                    ramp = Some(warmup);
+                }
                 other => tracing::warn!("ignoring unsupported workout element <{other}>"),
             }
         }
 
-        if segments.is_empty() {
+        if segments.is_empty() && ramp.is_none() {
             bail!("workout has no segments");
         }
-        Ok(Workout { name, description, segments })
+        let start = segments.last().map_or(0, Segment::end);
+        let ramp = ramp.map(|warmup| RampTest { start, warmup });
+        Ok(Workout { name, description, segments, ramp })
     }
 
     pub fn total_duration(&self) -> u32 {
@@ -174,6 +212,45 @@ impl Workout {
     pub fn target_watts(&self, t: f64, ftp: u32, intensity: f64) -> Option<u16> {
         self.power_at(t)
             .map(|f| (f * ftp as f64 * intensity).round().clamp(0.0, 2000.0) as u16)
+    }
+
+    /// Length as listed: a ramp test lasts until the rider gives up.
+    pub fn duration_label(&self) -> String {
+        match self.ramp {
+            Some(r) if r.steps_start() > 0 => format!("{} + ramp", fmt_duration(r.steps_start())),
+            Some(_) => "ramp".into(),
+            None => fmt_duration(self.total_duration()),
+        }
+    }
+
+    /// Adds the ramp test's warmup and 1-minute ERG steps from `RAMP_START_W`, `RAMP_STEP_W` higher
+    /// each, planned a bit past the expected end; `add_ramp_step` continues if the rider gets further.
+    pub fn plan_ramp(&mut self, ftp: u32) {
+        let Some(ramp) = self.ramp.filter(|r| self.total_duration() == r.start) else { return };
+        let watts = |w: u32| w as f64 / ftp.max(1) as f64;
+        if ramp.warmup > 0 {
+            self.segments.push(Segment {
+                kind: SegmentKind::Warmup,
+                start: ramp.start,
+                duration: ramp.warmup,
+                power_start: Some(watts(RAMP_WARMUP_FROM_W)),
+                power_end: Some(watts(RAMP_START_W)),
+                cadence: None,
+            });
+        }
+        let expected = ftp as f64 / RAMP_FTP_FACTOR * 1.15;
+        let steps = ((expected - RAMP_START_W as f64) / RAMP_STEP_W as f64).ceil().max(5.0) as u32 + 1;
+        for _ in 0..steps {
+            self.add_ramp_step(ftp);
+        }
+    }
+
+    pub fn add_ramp_step(&mut self, ftp: u32) {
+        let Some(ramp) = self.ramp else { return };
+        let start = self.total_duration();
+        let n = start.saturating_sub(ramp.steps_start()) / RAMP_STEP_SECS;
+        let p = (RAMP_START_W + n * RAMP_STEP_W) as f64 / ftp.max(1) as f64;
+        self.segments.push(Segment { kind: SegmentKind::Steady, start, duration: RAMP_STEP_SECS, power_start: Some(p), power_end: Some(p), cadence: None });
     }
 
     pub fn max_power(&self) -> f64 {
@@ -316,6 +393,36 @@ mod tests {
         assert_eq!(w.cadence_at(660.0), Some(88));
         assert_eq!(w.cadence_at(1500.0), None);
         assert!(Workout::parse(r#"<workout_file><workout><SteadyState Duration="60" Power="0.5" Cadence="x"/></workout></workout_file>"#).is_err());
+    }
+
+    #[test]
+    fn ramp_test_steps() {
+        let mut w = Workout::parse(include_str!("../workouts/ramp_test.zwo")).unwrap();
+        assert_eq!((w.total_duration(), w.duration_label()), (0, "05:00 + ramp".to_string()));
+        w.plan_ramp(250);
+        w.plan_ramp(250);
+        // 250 / 0.75 * 1.15 = 383 W: 15 steps past 100 W, plus the first one.
+        assert_eq!(w.total_duration(), 300 + 16 * 60);
+        assert_eq!(w.target_watts(0.0, 250, 1.0), Some(60));
+        assert_eq!(w.target_watts(150.0, 250, 1.0), Some(80));
+        assert_eq!(w.target_watts(300.0, 250, 1.0), Some(100));
+        assert_eq!(w.target_watts(419.0, 250, 1.0), Some(120));
+        w.add_ramp_step(250);
+        assert_eq!(w.target_watts(300.0 + 16.0 * 60.0, 250, 1.0), Some(420));
+    }
+
+    #[test]
+    fn ramp_test_after_other_segments() {
+        let xml = r#"<workout_file><workout>
+            <SteadyState Duration="600" Power="0.5"/>
+            <RampTest/>
+        </workout></workout_file>"#;
+        let mut w = Workout::parse(xml).unwrap();
+        assert_eq!(w.duration_label(), "10:00 + ramp");
+        w.plan_ramp(200);
+        assert_eq!(w.target_watts(600.0, 200, 1.0), Some(100));
+        let after = r#"<workout_file><workout><RampTest/><SteadyState Duration="60" Power="0.5"/></workout></workout_file>"#;
+        assert!(Workout::parse(after).is_err());
     }
 
     #[test]

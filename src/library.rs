@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use crate::workout::Workout;
 
 /// Copied into an empty workouts folder so there's something to ride.
-const EXAMPLES: [(&str, &str); 2] = [
+const EXAMPLES: [(&str, &str); 3] = [
+    ("ramp_test.zwo", include_str!("../workouts/ramp_test.zwo")),
     ("spin_up_40.zwo", include_str!("../workouts/spin_up_40.zwo")),
     ("sweet_spot_3x10.zwo", include_str!("../workouts/sweet_spot_3x10.zwo")),
 ];

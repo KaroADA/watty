@@ -39,6 +39,8 @@ fn step(opts: SimOptions) -> Duration {
 /// Simulated seconds between dropouts, and dropout length.
 const DROPOUT_EVERY: u32 = 150;
 const DROPOUT_LEN: u32 = 6;
+/// Above this ERG target the simulated rider fades, which ends a ramp test.
+const MAX_W: f64 = 400.0;
 
 /// Returns a flag that makes the simulated rider stop pedaling while set.
 pub fn spawn(tx: EventTx, target: watch::Receiver<TrainerTarget>, opts: SimOptions) -> Arc<AtomicBool> {
@@ -83,8 +85,10 @@ async fn trainer(
             let _ = tx.send(DeviceEvent::TargetApplied(want));
         }
         let coast = coasting.load(Ordering::Relaxed);
+        let fading = matches!(applied, TrainerTarget::Erg(w) if w as f64 > MAX_W);
         let goal = match applied {
             _ if coast => 0.0,
+            _ if fading => MAX_W * 0.6,
             TrainerTarget::Erg(w) => w as f64,
             _ => 160.0,
         };
@@ -96,7 +100,7 @@ async fn trainer(
         distance += speed_ms;
         let _ = tx.send(DeviceEvent::Bike(IndoorBikeData {
             speed_kmh: Some(speed_ms * 3.6),
-            cadence_rpm: (!coast).then(|| (90.0 + noise.next() * 3.0).round()),
+            cadence_rpm: (!coast).then(|| (if fading { 45.0 } else { 90.0 } + noise.next() * 3.0).round()),
             power_w: Some(p.round() as i16),
             distance_m: Some(distance as u32),
             heart_rate: None,

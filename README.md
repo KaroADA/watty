@@ -33,6 +33,8 @@ cargo build --release
 
 Start a ride with `Enter` on the Workouts tab, or `s` for a test ride on the simulator. Missing FTP or weight takes you to Settings first; the trainer and HR sensor are picked from a device scan.
 
+*Ramp test* is a workout like any other, so it can be planned in the calendar too: 5 min warmup, then ERG steps from 100 W, +20 W every minute, until the cadence stays below 55 rpm for 5 s. FTP is 75% of the best minute; press `f` at the end to save it. `<RampTest Warmup="300"/>` as the last element of any `.zwo` file does the same.
+
 ## Keys
 
 | Ride | |

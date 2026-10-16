@@ -203,7 +203,9 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         _ => Span::styled("ERG –  ", Style::new().fg(Color::DarkGray)),
     };
     spans.push(erg);
-    spans.push(Span::raw(format!("Intensity {:.0}%  ", s.intensity * 100.0)));
+    if s.ramp.is_none() {
+        spans.push(Span::raw(format!("Intensity {:.0}%  ", s.intensity * 100.0)));
+    }
     spans.push(Span::raw(format!("{:.2} km  {:.1} km/h  ", s.distance_m / 1000.0, s.speed_kmh())));
     if v.sim {
         spans.push(Span::styled("SIM ", Style::new().magenta().bold()));
@@ -233,8 +235,12 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
     let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).split(row2);
     f.render_widget(BigValue { title: "SEGMENT LEFT", value: fmt_duration(seg_left), unit: "", color: Color::White, note: None, icon: Some(Icon::Hourglass) }, cols[0]);
     f.render_widget(BigValue { title: "ELAPSED", value: fmt_duration(s.elapsed), unit: "", color: Color::White, note: None, icon: Some(Icon::Clock) }, cols[1]);
-    let left = s.workout.total_duration().saturating_sub(s.pos);
-    f.render_widget(BigValue { title: "REMAINING", value: fmt_duration(left), unit: "", color: Color::White, note: None, icon: Some(Icon::Flag) }, cols[2]);
+    if s.ramp.is_some() {
+        f.render_widget(BigValue { title: "FTP SO FAR", value: num(s.ramp_estimate().map(|p| p as u16)), unit: "W", color: Color::White, note: None, icon: Some(Icon::Flag) }, cols[2]);
+    } else {
+        let left = s.workout.total_duration().saturating_sub(s.pos);
+        f.render_widget(BigValue { title: "REMAINING", value: fmt_duration(left), unit: "", color: Color::White, note: None, icon: Some(Icon::Flag) }, cols[2]);
+    }
 
     f.render_widget(Chart { session: s, zoom: v.zoom.progress() }, chart);
 
@@ -243,7 +249,14 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         RunState::Ready => Line::styled(" Press SPACE to start", Style::new().yellow().bold()),
         RunState::Paused { auto: false } => Line::styled(" ⏸ PAUSED — SPACE to resume", Style::new().yellow().bold()),
         RunState::Paused { auto: true } => Line::styled(" ⏸ AUTO-PAUSED — start pedaling to resume", Style::new().yellow().bold()),
-        RunState::Finished => Line::styled(" ✓ Workout complete — keep riding or press q", Style::new().green().bold()),
+        RunState::Finished => match s.ramp.map(|r| r.result) {
+            Some(Some(r)) => {
+                let save = if r.saved { "saved" } else { "[f] save as your FTP" };
+                Line::styled(format!(" ✓ Ramp test done — best minute {} W, FTP {} W   {save}   — cool down or press q", r.best_minute, r.ftp), Style::new().green().bold())
+            }
+            Some(None) => Line::styled(" Ramp test over — not enough power data for a result", Style::new().yellow().bold()),
+            None => Line::styled(" ✓ Workout complete — keep riding or press q", Style::new().green().bold()),
+        },
         RunState::Running if s.hr_suggestion.is_some() => {
             let h = s.hr_suggestion.unwrap();
             Line::styled(format!(" ♥ HR {} above zone {} — [a] lower intensity 5%   [x] dismiss", h.hr, h.zone), Style::new().fg(Color::LightRed).bold())
@@ -254,7 +267,11 @@ pub fn draw_ride(f: &mut Frame, v: &View) {
         },
     };
     f.render_widget(status_line, status);
-    let mut keys = vec![("SPACE", "pause/resume"), ("+/-", "intensity ±5%"), ("n", "next segment"), ("q", "quit")];
+    let mut keys = match s.ramp {
+        Some(r) if r.result.is_some_and(|r| !r.saved) => vec![("f", "save FTP"), ("q", "quit")],
+        Some(_) => vec![("SPACE", "pause/resume"), ("q", "quit")],
+        None => vec![("SPACE", "pause/resume"), ("+/-", "intensity ±5%"), ("n", "next segment"), ("q", "quit")],
+    };
     if s.hr_suggestion.is_some() {
         keys.extend([("a", "lower intensity"), ("x", "dismiss")]);
     }

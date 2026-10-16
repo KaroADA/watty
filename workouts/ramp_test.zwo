@@ -1,0 +1,8 @@
+<workout_file>
+    <name>Ramp test</name>
+    <description>5 min warmup, then 100 W, +20 W every minute until you can't hold 55 rpm. FTP = 75% of the best minute.</description>
+    <sportType>bike</sportType>
+    <workout>
+        <RampTest Warmup="300"/>
+    </workout>
+</workout_file>

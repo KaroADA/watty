@@ -298,7 +298,7 @@ impl Calendar {
         if let Some(list) = &mut self.adding {
             let items: Vec<ListItem> = workouts
                 .iter()
-                .filter_map(|e| Some(ListItem::new(format!("{:<32} {}", e.title(), fmt_duration(e.workout.as_ref().ok()?.total_duration())))))
+                .filter_map(|e| Some(ListItem::new(format!("{:<32} {}", e.title(), e.workout.as_ref().ok()?.duration_label()))))
                 .collect();
             let popup = centered(f.area(), 50, (items.len() as u16 + 2).min(20));
             let block = panel(&format!("Plan for {}", self.day.format("%a %-d %b")))
@@ -428,7 +428,7 @@ impl Calendar {
             let (mark, style) = if p.done(rides) { ("✓ ", Color::Green) } else { ("○ ", Color::Yellow) };
             let mut spans = vec![Span::styled(mark, Style::new().fg(style)), Span::styled(name, LABEL)];
             match entry.map(|e| &e.workout) {
-                Some(Ok(w)) => spans.push(Span::styled(format!("  {}", fmt_duration(w.total_duration())), HINT)),
+                Some(Ok(w)) => spans.push(Span::styled(format!("  {}", w.duration_label()), HINT)),
                 Some(Err(_)) => spans.push(Span::styled("  invalid workout", Style::new().fg(Color::Red))),
                 None if !path.exists() => spans.push(Span::styled("  file not found", Style::new().fg(Color::Red))),
                 None => {}

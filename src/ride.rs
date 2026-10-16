@@ -19,7 +19,7 @@ use crate::recorder::{RideMeta, Recorder};
 use crate::session::{RunState, Sensors, Session};
 use crate::strava;
 use crate::ui::{self, ChartZoom, Picker, View};
-use crate::workout::{Workout, fmt_duration};
+use crate::workout::{RAMP_DEFAULT_FTP, Workout, fmt_duration};
 use crate::{DeviceArgs, Devices, start_devices};
 
 pub fn spawn_keys() -> mpsc::UnboundedReceiver<Event> {
@@ -69,13 +69,13 @@ pub struct RideSetup {
 pub async fn run(file: PathBuf, ftp: Option<u32>, weight: Option<f64>, select: bool, dev: DeviceArgs) -> Result<()> {
     let mut cfg = Config::load()?;
     let workout = Workout::load(&file)?;
-    let ftp = ftp.or(cfg.ftp).ok_or_else(|| anyhow!("FTP unknown: pass --ftp <watts> (it will be saved to config)"))?;
+    cfg.ftp = ftp.or(cfg.ftp);
+    let ftp = cfg.ftp.or(workout.ramp.map(|_| RAMP_DEFAULT_FTP)).ok_or_else(|| anyhow!("FTP unknown: pass --ftp <watts> (it will be saved to config)"))?;
     let weight = weight
         .or(cfg.weight)
         .filter(|w| (30.0..=200.0).contains(w))
         .ok_or_else(|| anyhow!("weight unknown: pass --weight <kg> (it will be saved to config)"))?;
     cfg.hr_zones()?;
-    cfg.ftp = Some(ftp);
     cfg.weight = Some(weight);
     cfg.save()?;
 
@@ -200,6 +200,13 @@ pub async fn ride(
                     KeyCode::Char('n') => session.skip_segment(),
                     KeyCode::Char('a') => session.answer_hr_suggestion(true),
                     KeyCode::Char('x') => session.answer_hr_suggestion(false),
+                    KeyCode::Char('f') => if let Some(r) = session.ramp.as_mut().and_then(|r| r.result.as_mut()).filter(|r| !r.saved) {
+                        cfg.ftp = Some(r.ftp);
+                        match cfg.save() {
+                            Ok(()) => r.saved = true,
+                            Err(e) => message = Some((Instant::now(), format!("cannot save FTP: {e:#}"))),
+                        }
+                    },
                     KeyCode::Char('s') => if let Some(c) = &devices.coasting {
                         c.fetch_xor(true, Ordering::Relaxed);
                     },
@@ -237,6 +244,9 @@ pub async fn ride(
                     if let Some(r) = recorder.as_mut() {
                         r.meta.intensity = session.intensity;
                         r.meta.finished = session.state == RunState::Finished;
+                        if let Some(result) = session.ramp.and_then(|r| r.result) {
+                            r.meta.ftp = result.ftp;
+                        }
                     }
                     if let Some(r) = recorder.as_mut()
                         && let Err(e) = r.record(sample)
@@ -269,6 +279,10 @@ pub async fn ride(
         fmt_duration(session.pos.min(session.workout.total_duration())),
         fmt_duration(session.workout.total_duration()),
     );
+    if let Some(r) = session.ramp.and_then(|r| r.result) {
+        let note = if r.saved { "saved" } else { "not saved" };
+        out += &format!("\nramp test: best minute {} W, FTP {} W ({note})", r.best_minute, r.ftp);
+    }
     let mut saved = None;
     if let Some(r) = recorder.take_if(|_| discard) {
         match r.discard() {

@@ -24,7 +24,7 @@ use crate::ride::{self, RideSetup, key_press, spawn_keys};
 use crate::session::Session;
 use crate::strava;
 use crate::ui::{Chart, HINT, LABEL, centered, key_hints, panel, tilde};
-use crate::workout::{Workout, fmt_duration};
+use crate::workout::{RAMP_DEFAULT_FTP, Workout, fmt_duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -346,7 +346,8 @@ impl Home {
         workout: Workout,
         sim: bool,
     ) {
-        let (Some(ftp), Some(weight)) = (self.cfg.ftp, self.cfg.weight) else {
+        let ftp = self.cfg.ftp.or(workout.ramp.map(|_| RAMP_DEFAULT_FTP));
+        let (Some(ftp), Some(weight)) = (ftp, self.cfg.weight) else {
             return self.need_settings("FTP and weight");
         };
         let setup = RideSetup { workout, workout_path: Some(path), resume: None, ftp, weight, select: false, dev: DeviceArgs::configured(sim) };
@@ -471,7 +472,7 @@ fn draw_workouts(f: &mut Frame, area: Rect, h: &mut Home) {
         .map(|e| match &e.workout {
             Ok(w) => ListItem::new(Line::from(vec![
                 Span::raw(format!("{:<30} ", e.title())),
-                Span::styled(fmt_duration(w.total_duration()), HINT),
+                Span::styled(w.duration_label(), HINT),
                 Span::styled(if today.contains(&e.path) { "  ○ today" } else { "" }, Style::new().fg(Color::Yellow)),
             ])),
             Err(_) => ListItem::new(Line::styled(format!("{} (invalid)", e.file_name()), Style::new().red())),
@@ -498,8 +499,11 @@ fn draw_workouts(f: &mut Frame, area: Rect, h: &mut Home) {
     };
     let [info, chart] = Layout::vertical([Constraint::Length(6), Constraint::Min(5)]).areas(detail);
     let mut lines = vec![Line::from(vec![
-        Span::styled(fmt_duration(w.total_duration()), LABEL),
-        Span::styled(format!("  ·  {} segments  ·  {}", w.segments.len(), entry.file_name()), HINT),
+        Span::styled(w.duration_label(), LABEL),
+        Span::styled(match w.ramp {
+            Some(_) => format!("  ·  {}", entry.file_name()),
+            None => format!("  ·  {} segments  ·  {}", w.segments.len(), entry.file_name()),
+        }, HINT),
     ])];
     if !w.description.is_empty() {
         lines.push(Line::raw(w.description.clone()));

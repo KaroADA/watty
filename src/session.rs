@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::HrZones;
 use crate::devices::{DeviceEvent, LinkStatus, Role, TrainerTarget};
-use crate::workout::Workout;
+use crate::workout::{RAMP_FTP_FACTOR, Workout};
 
 const STALE: Duration = Duration::from_secs(3);
 const AVG_WINDOW: Duration = Duration::from_secs(3);
@@ -20,6 +20,13 @@ const HR_HIGH_AFTER: u32 = 60;
 /// HR lags behind power, so the start of a segment doesn't count.
 const HR_GRACE_SECS: u32 = 120;
 const HR_SUGGEST_COOLDOWN: u32 = 120;
+/// The ramp test ends after `RAMP_FAIL_AFTER` s below this cadence, or without a cadence
+/// reading, below `RAMP_FAIL_POWER` of the target.
+const RAMP_FAIL_RPM: u16 = 55;
+const RAMP_FAIL_POWER: f64 = 0.6;
+const RAMP_FAIL_AFTER: u32 = 5;
+/// Seconds of ramp steps kept ahead of the rider.
+const RAMP_LOOKAHEAD: u32 = 180;
 
 /// Power zone 1–6 for a fraction of FTP.
 pub fn power_zone(frac: f64) -> u8 {
@@ -147,6 +154,28 @@ pub struct HrSuggestion {
     pub zone: u8,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RampProgress {
+    struggling_secs: u32,
+    pub result: Option<RampResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RampResult {
+    pub best_minute: u16,
+    pub ftp: u32,
+    pub saved: bool,
+}
+
+/// Best 60 s average power.
+pub fn best_minute(trace: &[Option<u16>]) -> Option<u16> {
+    trace
+        .windows(60)
+        .map(|w| w.iter().map(|p| p.unwrap_or(0) as u32).sum::<u32>() / 60)
+        .max()
+        .map(|p| p as u16)
+}
+
 #[derive(Debug, Clone)]
 pub struct Sample {
     /// Seconds since ride start, pauses included.
@@ -182,6 +211,7 @@ pub struct Session {
     pub soft_start: bool,
     pub hr_zones: Option<HrZones>,
     pub hr_suggestion: Option<HrSuggestion>,
+    pub ramp: Option<RampProgress>,
     hr_high_secs: u32,
     hr_cooldown: u32,
     /// Seconds of soft start remaining.
@@ -192,7 +222,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(workout: Workout, ftp: u32, rider_kg: f64, auto_pause: bool) -> Self {
+    /// A ramp test ends when the rider gives up rather than by pausing, and its targets are fixed.
+    pub fn new(mut workout: Workout, ftp: u32, rider_kg: f64, auto_pause: bool) -> Self {
+        workout.plan_ramp(ftp);
+        let ramp = workout.ramp.map(|_| RampProgress::default());
+        let auto_pause = auto_pause && ramp.is_none();
         let n = workout.total_duration() as usize;
         Self {
             workout,
@@ -210,12 +244,50 @@ impl Session {
             soft_start: true,
             hr_zones: None,
             hr_suggestion: None,
+            ramp,
             hr_high_secs: 0,
             hr_cooldown: 0,
             soft_left: 0,
             pedal_secs: 0,
             idle_secs: 0,
         }
+    }
+
+    /// FTP from the best minute so far.
+    pub fn ramp_estimate(&self) -> Option<u32> {
+        let ridden = &self.trace[..(self.pos as usize).min(self.trace.len())];
+        best_minute(ridden).map(|p| (p as f64 * RAMP_FTP_FACTOR).round() as u32)
+    }
+
+    fn update_ramp(&mut self, s: &Sensors, target: Option<u16>) {
+        let (Some(mut ramp), Some(test)) = (self.ramp.filter(|r| r.result.is_none()), self.workout.ramp) else { return };
+        self.plan_ramp_ahead();
+        let struggling = self.pos >= test.steps_start()
+            && match s.cadence() {
+                Some(c) => c < RAMP_FAIL_RPM,
+                None => (s.instant_power().unwrap_or(0) as f64) < target.unwrap_or(0) as f64 * RAMP_FAIL_POWER,
+            };
+        ramp.struggling_secs = if struggling { ramp.struggling_secs + 1 } else { 0 };
+        if ramp.struggling_secs >= RAMP_FAIL_AFTER {
+            let ridden = &self.trace[..self.pos as usize];
+            ramp.result = best_minute(ridden).map(|best_minute| RampResult {
+                best_minute,
+                ftp: (best_minute as f64 * RAMP_FTP_FACTOR).round() as u32,
+                saved: false,
+            });
+            self.state = RunState::Finished;
+        }
+        self.ramp = Some(ramp);
+    }
+
+    fn plan_ramp_ahead(&mut self) {
+        if self.ramp.is_none() {
+            return;
+        }
+        while self.workout.total_duration() < self.pos + RAMP_LOOKAHEAD {
+            self.workout.add_ramp_step(self.ftp);
+        }
+        self.trace.resize(self.workout.total_duration() as usize, None);
     }
 
     pub fn speed_kmh(&self) -> f64 {
@@ -284,12 +356,15 @@ impl Session {
     }
 
     pub fn adjust_intensity(&mut self, delta: f64) {
+        if self.ramp.is_some() {
+            return;
+        }
         self.intensity = ((self.intensity + delta) * 100.0).round().clamp(50.0, 150.0) / 100.0;
     }
 
     /// Endurance and tempo segments only: harder efforts are expected to push HR up.
     fn hr_ceiling(&self) -> Option<(u8, u16)> {
-        let zones = self.hr_zones?;
+        let zones = self.hr_zones.filter(|_| self.ramp.is_none())?;
         let seg = self.workout.segment_at(self.pos as f64)?;
         if self.pos - seg.start < HR_GRACE_SECS {
             return None;
@@ -328,6 +403,9 @@ impl Session {
     }
 
     pub fn skip_segment(&mut self) {
+        if self.ramp.is_some() {
+            return;
+        }
         if let Some(i) = self.workout.segment_index_at(self.pos as f64) {
             self.pos = self.workout.segments[i].end();
             if self.pos >= self.workout.total_duration() {
@@ -363,6 +441,7 @@ impl Session {
         self.soft_left = self.soft_left.saturating_sub(1);
         if self.state == RunState::Running {
             self.pos += 1;
+            self.update_ramp(s, target);
             if self.pos >= self.workout.total_duration() {
                 self.state = RunState::Finished;
             }
@@ -381,6 +460,8 @@ impl Session {
 
     /// Picks up a ride from its recorded samples, paused. `clock` is the time since the ride started.
     pub fn restore(&mut self, samples: &[Sample], intensity: f64, clock: u32) {
+        self.pos = samples.last().map_or(0, |s| s.pos);
+        self.plan_ramp_ahead();
         for s in samples {
             if let Some(slot) = self.trace.get_mut(s.pos as usize) {
                 *slot = s.power;
@@ -641,5 +722,54 @@ mod tests {
         assert_eq!(s.state, RunState::Finished);
         assert_eq!(s.trainer_target(), TrainerTarget::FreeRide);
         assert!(s.tick(&Sensors::default()).is_some());
+    }
+
+    const WARMUP: u32 = 300;
+
+    fn ramp() -> Session {
+        let w = Workout::parse(include_str!("../workouts/ramp_test.zwo")).unwrap();
+        let mut s = Session::new(w, 250, 75.0, true);
+        s.soft_start = false;
+        s.toggle_pause();
+        s
+    }
+
+    #[test]
+    fn ramp_test_ends_when_cadence_drops() {
+        let mut s = ramp();
+        // Holds every target through the warmup and 7.5 min of steps: up to 240 W.
+        for _ in 0..WARMUP + 450 {
+            let w = s.target_watts().unwrap() as i16;
+            s.tick(&riding(Some(w), Some(90.0)));
+        }
+        assert!(s.workout.total_duration() >= s.pos + RAMP_LOOKAHEAD);
+        for _ in 0..RAMP_FAIL_AFTER - 1 {
+            s.tick(&riding(Some(100), Some(40.0)));
+        }
+        assert_eq!(s.state, RunState::Running);
+        s.tick(&riding(Some(100), Some(40.0)));
+        assert_eq!(s.state, RunState::Finished);
+        // Last full minute: 30 s at 220 W, 30 s at 240 W.
+        let r = s.ramp.unwrap().result.unwrap();
+        assert_eq!((r.best_minute, r.ftp), (230, 173));
+        assert_eq!(s.trainer_target(), TrainerTarget::FreeRide);
+    }
+
+    #[test]
+    fn ramp_test_ignores_pauses_and_intensity() {
+        let mut s = ramp();
+        // Not pedaling during the warmup doesn't end the test.
+        for _ in 0..WARMUP - 1 {
+            s.tick(&riding(None, None));
+        }
+        assert_eq!(s.state, RunState::Running);
+        s.adjust_intensity(0.05);
+        s.skip_segment();
+        assert_eq!((s.intensity, s.pos), (1.0, WARMUP - 1));
+        // Without cadence, power far below the target ends it.
+        for _ in 0..RAMP_FAIL_AFTER + 1 {
+            s.tick(&riding(Some(30), None));
+        }
+        assert_eq!(s.state, RunState::Finished);
     }
 }
